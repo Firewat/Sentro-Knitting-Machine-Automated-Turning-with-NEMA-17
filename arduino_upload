@@ -1,0 +1,196 @@
+// Sentro Knitting Machine Controller - Arduino Code
+// Controls NEMA 17 stepper motor via DRV8825/A4988 driver
+// Compatible with Python Knitting Machine Controller
+
+// Pin definitions
+const int stepPin = 2;
+const int dirPin = 3;
+const int enablePin = 4;  // Optional - connect to ENABLE on driver
+
+// Motor configuration
+const int stepsPerRevolution = 200;  // Standard NEMA 17 (1.8° per step)
+int microstepping = 1;               // Set based on your driver jumpers (1,2,4,8,16,32)
+int motorSpeed = 1000;               // Delay in microseconds between steps (lower = faster)
+
+// Variables for serial communication
+String inputString = "";
+boolean stringComplete = false;
+
+void setup() {
+  // Initialize pins
+  pinMode(stepPin, OUTPUT);
+  pinMode(dirPin, OUTPUT);
+  pinMode(enablePin, OUTPUT);
+  
+  // Enable the motor driver (LOW = enabled)
+  digitalWrite(enablePin, LOW);
+  
+  // Initialize serial communication
+  Serial.begin(9600);
+  Serial.println("=== Sentro Knitting Machine Controller ===");
+  Serial.println("Arduino firmware ready for Python controller");
+  Serial.println("");
+  Serial.println("Available Commands:");
+  Serial.println("TURN:<steps>:<direction> - Turn specific steps (direction: CW/CCW)");
+  Serial.println("REV:<revolutions>:<direction> - Turn full revolutions");
+  Serial.println("SPEED:<microseconds> - Set step delay (500-3000)");
+  Serial.println("MICRO:<value> - Set microstepping (1,2,4,8,16,32)");
+  Serial.println("WAIT:<seconds> - Pause for specified time");
+  Serial.println("STOP - Emergency stop");
+  Serial.println("STATUS - Get current settings");
+  Serial.println("================================");
+  
+  inputString.reserve(50);
+}
+
+void loop() {
+  // Check for serial commands
+  if (stringComplete) {
+    processCommand(inputString);
+    inputString = "";
+    stringComplete = false;
+  }
+}
+
+// Serial event handler
+void serialEvent() {
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    inputString += inChar;
+    if (inChar == '\n') {
+      stringComplete = true;
+    }
+  }
+}
+
+void processCommand(String command) {
+  command.trim();
+  command.toUpperCase();
+  
+  if (command.startsWith("TURN:")) {
+    // Parse TURN:steps:direction
+    int firstColon = command.indexOf(':', 5);
+    int secondColon = command.indexOf(':', firstColon + 1);
+    
+    if (firstColon > 0 && secondColon > 0) {
+      int steps = command.substring(5, firstColon).toInt();
+      String direction = command.substring(firstColon + 1, secondColon);
+      
+      Serial.println("Executing: Turn " + String(steps) + " steps " + direction);
+      turnSteps(steps, direction == "CW");
+      Serial.println("Turn complete");
+    } else {
+      Serial.println("ERROR: Invalid TURN command format");
+    }
+  }
+  
+  else if (command.startsWith("REV:")) {
+    // Parse REV:revolutions:direction
+    int firstColon = command.indexOf(':', 4);
+    int secondColon = command.indexOf(':', firstColon + 1);
+    
+    if (firstColon > 0 && secondColon > 0) {
+      float revolutions = command.substring(4, firstColon).toFloat();
+      String direction = command.substring(firstColon + 1, secondColon);
+      
+      int totalSteps = revolutions * stepsPerRevolution * microstepping;
+      Serial.println("Executing: " + String(revolutions) + " revolutions (" + String(totalSteps) + " steps) " + direction);
+      turnSteps(totalSteps, direction == "CW");
+      Serial.println("Revolution complete");
+    } else {
+      Serial.println("ERROR: Invalid REV command format");
+    }
+  }
+  
+  else if (command.startsWith("SPEED:")) {
+    // Set motor speed
+    int newSpeed = command.substring(6).toInt();
+    if (newSpeed >= 500 && newSpeed <= 3000) {
+      motorSpeed = newSpeed;
+      Serial.println("Motor speed set to " + String(motorSpeed) + " microseconds");
+    } else {
+      Serial.println("ERROR: Speed must be between 500-3000 microseconds");
+    }
+  }
+  
+  else if (command.startsWith("MICRO:")) {
+    // Set microstepping
+    int newMicro = command.substring(6).toInt();
+    if (newMicro == 1 || newMicro == 2 || newMicro == 4 || newMicro == 8 || newMicro == 16 || newMicro == 32) {
+      microstepping = newMicro;
+      Serial.println("Microstepping set to 1/" + String(microstepping));
+      Serial.println("NOTE: Ensure driver jumpers match this setting");
+    } else {
+      Serial.println("ERROR: Microstepping must be 1, 2, 4, 8, 16, or 32");
+    }
+  }
+  
+  else if (command.startsWith("WAIT:")) {
+    // Wait/pause command for pattern execution
+    float waitTime = command.substring(5).toFloat();
+    if (waitTime >= 0 && waitTime <= 60) {
+      Serial.println("Waiting " + String(waitTime) + " seconds...");
+      delay(waitTime * 1000);
+      Serial.println("Wait complete");
+    } else {
+      Serial.println("ERROR: Wait time must be between 0-60 seconds");
+    }
+  }
+  
+  else if (command == "STOP") {
+    Serial.println("EMERGENCY STOP - Motor disabled");
+    digitalWrite(enablePin, HIGH);  // Disable motor
+    delay(100);
+    digitalWrite(enablePin, LOW);   // Re-enable motor
+    Serial.println("Motor re-enabled and ready");
+  }
+  
+  else if (command == "STATUS") {
+    Serial.println("=== Sentro Controller Status ===");
+    Serial.println("Firmware: Sentro Knitting Machine v1.0");
+    Serial.println("Steps per revolution: " + String(stepsPerRevolution));
+    Serial.println("Current microstepping: 1/" + String(microstepping));
+    Serial.println("Motor speed: " + String(motorSpeed) + " microseconds");
+    Serial.println("Steps per full rotation: " + String(stepsPerRevolution * microstepping));
+    Serial.println("Motor status: " + String(digitalRead(enablePin) ? "Disabled" : "Enabled"));
+    Serial.println("Ready for knitting commands");
+    Serial.println("===============================");
+  }
+  
+  else {
+    Serial.println("ERROR: Unknown command - " + command);
+    Serial.println("Type STATUS for help or check Python controller");
+  }
+}
+
+void turnSteps(int steps, boolean clockwise) {
+  // Set direction
+  digitalWrite(dirPin, clockwise ? HIGH : LOW);
+  
+  // Small delay to ensure direction is set
+  delayMicroseconds(10);
+  
+  // Perform steps with progress indication
+  for (int i = 0; i < steps; i++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(motorSpeed / 2);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(motorSpeed / 2);
+    
+    // Progress indication for long operations
+    if (steps > 1000 && i % 500 == 0 && i > 0) {
+      Serial.println("Progress: " + String(i) + "/" + String(steps) + " steps");
+    }
+    
+    // Check for emergency stop every 100 steps
+    if (i % 100 == 0 && Serial.available()) {
+      String emergencyCheck = Serial.readString();
+      emergencyCheck.trim();
+      emergencyCheck.toUpperCase();
+      if (emergencyCheck == "STOP") {
+        Serial.println("EMERGENCY STOP at step " + String(i) + "/" + String(steps));
+        return;
+      }
+    }
+  }
+}
