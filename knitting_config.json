@@ -1,0 +1,6 @@
+{
+  "steps_per_needle": 10,
+  "default_speed": 1000,
+  "microstepping": 1,
+  "com_port": "AUTO"
+}
