@@ -19,7 +19,7 @@ class KnittingMachineController:
     def __init__(self, root):
         self.root = root
         self.root.title("Sentro Knitting Machine Controller")
-        self.root.geometry("800x600")
+        self.root.geometry("900x700")
         
         # Serial connection
         self.arduino = None
@@ -235,7 +235,7 @@ class KnittingMachineController:
         micro_frame.pack(pady=5, fill=tk.X)
         ttk.Label(micro_frame, text="Microstepping:").pack(side=tk.LEFT)
         self.micro_var = tk.StringVar(value=str(self.config["microstepping"]))
-        micro_combo = ttk.Combobox(micro_frame, textvariable=self.micro_var, values=[1,2,4,8,16], width=8)
+        micro_combo = ttk.Combobox(micro_frame, textvariable=self.micro_var, values=[1,2,4,8,16,32], width=8)
         micro_combo.pack(side=tk.RIGHT)
         
         ttk.Button(motor_frame, text="Apply Microstepping", command=self.apply_microstepping).pack(pady=5)
@@ -389,338 +389,6 @@ class KnittingMachineController:
         ttk.Button(script_btn_frame, text="Save Script", command=self.save_script).pack(side=tk.LEFT, padx=2)
         ttk.Button(script_btn_frame, text="Load Script", command=self.load_script).pack(side=tk.LEFT, padx=2)
     
-    def on_preset_change(self, event=None):
-        """Handle preset pattern change"""
-        preset = self.preset_var.get()
-        # Sentro only does stockinette stitch, but can do color patterns
-        if preset == "stockinette":
-            self.color_change_var.set("none")
-        elif preset == "color_stripes":
-            self.color_change_var.set("every_2_rows")
-        elif preset == "custom_rows":
-            self.color_change_var.set("custom")
-    
-    def generate_pattern(self):
-        """Generate knitting pattern based on settings"""
-        try:
-            width = int(self.pattern_width_var.get())
-            length = int(self.pattern_length_var.get())
-            pattern_type = self.pattern_type_var.get()
-            preset = self.preset_var.get()
-            color_pattern = self.color_change_var.get()
-            speed = self.script_speed_var.get()
-            pause = float(self.pause_var.get())
-            
-            if width > 48:
-                messagebox.showerror("Error", "Maximum width is 48 needles")
-                return
-            
-            # Generate pattern
-            script_lines = []
-            script_lines.append(f"# Pattern: {self.pattern_name_var.get()}")
-            script_lines.append(f"# Description: {self.pattern_desc_var.get()}")
-            script_lines.append(f"# Dimensions: {width} needles x {length} rows")
-            script_lines.append(f"# Type: {pattern_type} - stockinette (knit only)")
-            script_lines.append(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            script_lines.append("")
-            script_lines.append(f"SPEED:{speed}")
-            script_lines.append("")
-            
-            # Color change logic
-            color_pattern = self.color_change_var.get()
-            color_change_rows = []
-            
-            if color_pattern == "every_row":
-                color_change_rows = list(range(1, length + 1))
-            elif color_pattern == "every_2_rows":
-                color_change_rows = list(range(2, length + 1, 2))
-            elif color_pattern == "every_5_rows":
-                color_change_rows = list(range(5, length + 1, 5))
-            elif color_pattern == "every_10_rows":
-                color_change_rows = list(range(10, length + 1, 10))
-            
-            # Calculate steps per needle from config
-            steps_per_needle = int(self.steps_per_needle_var.get()) if hasattr(self, 'steps_per_needle_var') else 10
-            
-            for row in range(1, length + 1):
-                script_lines.append(f"# Row {row}")
-                
-                # Add color change instruction if needed
-                if row in color_change_rows:
-                    script_lines.append(f"# >>> CHANGE YARN COLOR NOW <<<")
-                    script_lines.append(f"WAIT:5  # Wait for manual color change")
-                
-                if pattern_type == "circular":
-                    # Circular knitting - always same direction (clockwise)
-                    direction = "CW"
-                    total_steps = width * steps_per_needle
-                    script_lines.append(f"TURN:{total_steps}:{direction}")
-                else:
-                    # Flat knitting - alternate directions for flat panels
-                    direction = "CW" if row % 2 == 1 else "CCW"
-                    total_steps = width * steps_per_needle
-                    script_lines.append(f"TURN:{total_steps}:{direction}")
-                
-                # Add pause between rows
-                if pause > 0 and row < length:
-                    script_lines.append(f"WAIT:{pause}")
-                
-                script_lines.append("")
-            
-            script_lines.append("# Pattern complete")
-            script_lines.append("STATUS")
-            
-            # Display script
-            script_content = "\n".join(script_lines)
-            self.script_text.delete(1.0, tk.END)
-            self.script_text.insert(1.0, script_content)
-            
-            # Draw pattern preview
-            self.draw_pattern_preview(width, length, pattern_type, color_pattern)
-            
-            self.current_pattern = {
-                "name": self.pattern_name_var.get(),
-                "description": self.pattern_desc_var.get(),
-                "width": width,
-                "length": length,
-                "type": pattern_type,  # Can be circular OR flat
-                "preset": preset,
-                "color_pattern": color_pattern,
-                "speed": speed,
-                "pause": pause,
-                "script": script_content
-            }
-            
-            self.pattern_modified = True
-            self.log_message(f"Pattern generated: {width}x{length} {pattern_type}", "SUCCESS")
-            
-        except ValueError as e:
-            messagebox.showerror("Error", f"Invalid input values: {e}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Error generating pattern: {e}")
-    
-    def draw_pattern_preview(self, width, length, pattern_type, color_pattern):
-        """Draw visual pattern preview for Sentro machine"""
-        self.pattern_canvas.delete("all")
-        
-        if width == 0 or length == 0:
-            return
-        
-        # Calculate cell size
-        canvas_width = self.pattern_canvas.winfo_width() or 400
-        canvas_height = 200
-        
-        cell_width = min(20, (canvas_width - 20) // width)
-        cell_height = 15
-        
-        # Colors for stockinette and color changes
-        base_color = '#e6f3ff'  # Light blue for stockinette
-        alt_color = '#ffe6e6'   # Light red for alternate color
-        
-        # Determine color change rows
-        color_change_rows = set()
-        if color_pattern == "every_row":
-            color_change_rows = set(range(1, length + 1, 2))
-        elif color_pattern == "every_2_rows":
-            color_change_rows = set(range(1, length + 1, 4))  # Every other pair
-        elif color_pattern == "every_5_rows":
-            color_change_rows = set(range(4, length + 1, 10))  # Rows 5-9, 15-19, etc
-        elif color_pattern == "every_10_rows":
-            color_change_rows = set(range(9, length + 1, 20))  # Rows 10-19, 30-39, etc
-        
-        # Draw pattern
-        for row in range(min(length, canvas_height // cell_height)):
-            y = 10 + row * cell_height
-            
-            # Determine row color
-            color = alt_color if row in color_change_rows else base_color
-            
-            for col in range(width):
-                x = 10 + col * cell_width
-                
-                # Draw cell
-                self.pattern_canvas.create_rectangle(
-                    x, y, x + cell_width, y + cell_height,
-                    fill=color, outline='gray', width=1
-                )
-                
-                # Add knit symbol (all stitches are knit on Sentro)
-                self.pattern_canvas.create_text(
-                    x + cell_width//2, y + cell_height//2,
-                    text="K", font=("Arial", 8)
-                )
-        
-        # Add pattern type indicator
-        type_text = f"Pattern: {pattern_type.title()} Knitting"
-        if pattern_type == "flat":
-            type_text += " (alternating directions)"
-        
-        self.pattern_canvas.create_text(10, canvas_height - 40, text=type_text, anchor=tk.W, font=("Arial", 10, "bold"))
-        
-        # Add legend
-        legend_y = min(length, canvas_height // cell_height) * cell_height + 30
-        self.pattern_canvas.create_rectangle(10, legend_y, 30, legend_y + 15, 
-                                           fill=base_color, outline='gray')
-        self.pattern_canvas.create_text(40, legend_y + 7, text="Main color", anchor=tk.W)
-        
-        if color_change_rows:
-            self.pattern_canvas.create_rectangle(120, legend_y, 140, legend_y + 15, 
-                                               fill=alt_color, outline='gray')
-            self.pattern_canvas.create_text(150, legend_y + 7, text="Alternate color", anchor=tk.W)
-        
-        # Update scroll region
-        self.pattern_canvas.configure(scrollregion=self.pattern_canvas.bbox("all"))
-    
-    def save_pattern(self):
-        """Save current pattern to file"""
-        if not self.current_pattern:
-            messagebox.showwarning("Warning", "No pattern to save. Generate a pattern first.")
-            return
-        
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            title="Save Pattern"
-        )
-        
-        if filename:
-            try:
-                with open(filename, 'w') as f:
-                    json.dump(self.current_pattern, f, indent=2)
-                self.log_message(f"Pattern saved: {filename}", "SUCCESS")
-                self.pattern_modified = False
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not save pattern: {e}")
-    
-    def load_pattern(self):
-        """Load pattern from file"""
-        filename = filedialog.askopenfilename(
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            title="Load Pattern"
-        )
-        
-        if filename:
-            try:
-                with open(filename, 'r') as f:
-                    pattern = json.load(f)
-                
-                # Load pattern into GUI
-                self.pattern_name_var.set(pattern.get("name", ""))
-                self.pattern_desc_var.set(pattern.get("description", ""))
-                self.pattern_width_var.set(str(pattern.get("width", 20)))
-                self.pattern_length_var.set(str(pattern.get("length", 10)))
-                self.pattern_type_var.set(pattern.get("type", "circular"))
-                self.preset_var.set(pattern.get("preset", "stockinette"))
-                self.color_change_var.set(pattern.get("color_pattern", "none"))
-                self.script_speed_var.set(str(pattern.get("speed", 1000)))
-                self.pause_var.set(str(pattern.get("pause", 1)))
-                
-                # Load script
-                if "script" in pattern:
-                    self.script_text.delete(1.0, tk.END)
-                    self.script_text.insert(1.0, pattern["script"])
-                
-                self.current_pattern = pattern
-                self.pattern_modified = False
-                
-                # Regenerate preview
-                self.draw_pattern_preview(
-                    pattern.get("width", 20),
-                    pattern.get("length", 10),
-                    pattern.get("type", "circular"),
-                    pattern.get("color_pattern", "none")
-                )
-                
-                self.log_message(f"Pattern loaded: {filename}", "SUCCESS")
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not load pattern: {e}")
-    
-    def save_script(self):
-        """Save script to text file"""
-        script_content = self.script_text.get(1.0, tk.END).strip()
-        if not script_content:
-            messagebox.showwarning("Warning", "No script to save.")
-            return
-        
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            title="Save Script"
-        )
-        
-        if filename:
-            try:
-                with open(filename, 'w') as f:
-                    f.write(script_content)
-                self.log_message(f"Script saved: {filename}", "SUCCESS")
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not save script: {e}")
-    
-    def load_script(self):
-        """Load script from text file"""
-        filename = filedialog.askopenfilename(
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            title="Load Script"
-        )
-        
-        if filename:
-            try:
-                with open(filename, 'r') as f:
-                    script_content = f.read()
-                
-                self.script_text.delete(1.0, tk.END)
-                self.script_text.insert(1.0, script_content)
-                self.log_message(f"Script loaded: {filename}", "SUCCESS")
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not load script: {e}")
-    
-    def clear_script(self):
-        """Clear the script text area"""
-        self.script_text.delete(1.0, tk.END)
-    
-    def execute_pattern(self):
-        """Execute the current pattern script"""
-        script_content = self.script_text.get(1.0, tk.END).strip()
-        if not script_content:
-            messagebox.showwarning("Warning", "No script to execute. Generate a pattern first.")
-            return
-        
-        if not self.is_connected:
-            messagebox.showerror("Error", "Not connected to Arduino")
-            return
-        
-        # Confirm execution
-        result = messagebox.askyesno(
-            "Execute Pattern", 
-            f"Execute pattern: {self.pattern_name_var.get()}\n\nThis will start the knitting process. Continue?",
-            icon="question"
-        )
-        
-        if result:
-            # Execute script in separate thread
-            def execute_script():
-                lines = script_content.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line and not line.startswith('#'):
-                        if line.startswith('WAIT:'):
-                            wait_time = float(line.split(':')[1])
-                            self.log_message(f"Waiting {wait_time} seconds...", "INFO")
-                            time.sleep(wait_time)
-                        else:
-                            self.send_command(line)
-                            time.sleep(0.1)  # Small delay between commands
-                
-                self.log_message("Pattern execution completed", "SUCCESS")
-            
-            # Start execution thread
-            execution_thread = threading.Thread(target=execute_script, daemon=True)
-            execution_thread.start()
-            
-            self.log_message("Pattern execution started", "SUCCESS")
-    
     def create_console_tab(self, notebook):
         """Create console tab"""
         console_frame = ttk.Frame(notebook)
@@ -735,7 +403,8 @@ class KnittingMachineController:
 TURN:<steps>:<direction>     - Turn specific steps (direction: CW/CCW)
 REV:<revolutions>:<direction> - Turn full revolutions (direction: CW/CCW)
 SPEED:<microseconds>         - Set step delay (500-3000, lower = faster)
-MICRO:<value>               - Set microstepping (1, 2, 4, 8, 16)
+MICRO:<value>               - Set microstepping (1, 2, 4, 8, 16, 32)
+WAIT:<seconds>              - Pause for specified time (0-60 seconds)
 STOP                        - Emergency stop and re-enable motor
 STATUS                      - Get current motor settings and configuration
 
@@ -744,6 +413,7 @@ TURN:100:CW    - Turn 100 steps clockwise
 REV:2.5:CCW    - Turn 2.5 revolutions counter-clockwise
 SPEED:800      - Set speed to 800 microseconds (faster)
 MICRO:8        - Set microstepping to 1/8 step
+WAIT:2         - Wait 2 seconds
         """
         
         # Commands display (read-only)
@@ -990,6 +660,337 @@ MICRO:8        - Set microstepping to 1/8 step
             self.log_message("Settings saved successfully", "SUCCESS")
         except Exception as e:
             messagebox.showerror("Error", f"Could not save settings: {e}")
+    
+    def on_preset_change(self, event=None):
+        """Handle preset pattern change"""
+        preset = self.preset_var.get()
+        # Sentro only does stockinette stitch, but can do color patterns
+        if preset == "stockinette":
+            self.color_change_var.set("none")
+        elif preset == "color_stripes":
+            self.color_change_var.set("every_2_rows")
+        elif preset == "custom_rows":
+            self.color_change_var.set("custom")
+    
+    def generate_pattern(self):
+        """Generate knitting pattern based on settings"""
+        try:
+            width = int(self.pattern_width_var.get())
+            length = int(self.pattern_length_var.get())
+            pattern_type = self.pattern_type_var.get()
+            preset = self.preset_var.get()
+            color_pattern = self.color_change_var.get()
+            speed = self.script_speed_var.get()
+            pause = float(self.pause_var.get())
+            
+            if width > 48:
+                messagebox.showerror("Error", "Maximum width is 48 needles")
+                return
+            
+            # Generate pattern
+            script_lines = []
+            script_lines.append(f"# Pattern: {self.pattern_name_var.get()}")
+            script_lines.append(f"# Description: {self.pattern_desc_var.get()}")
+            script_lines.append(f"# Dimensions: {width} needles x {length} rows")
+            script_lines.append(f"# Type: {pattern_type} - stockinette (knit only)")
+            script_lines.append(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            script_lines.append("")
+            script_lines.append(f"SPEED:{speed}")
+            script_lines.append("")
+            
+            # Color change logic
+            color_change_rows = []
+            
+            if color_pattern == "every_row":
+                color_change_rows = list(range(1, length + 1))
+            elif color_pattern == "every_2_rows":
+                color_change_rows = list(range(2, length + 1, 2))
+            elif color_pattern == "every_5_rows":
+                color_change_rows = list(range(5, length + 1, 5))
+            elif color_pattern == "every_10_rows":
+                color_change_rows = list(range(10, length + 1, 10))
+            
+            # Calculate steps per needle from config
+            steps_per_needle = int(self.steps_per_needle_var.get())
+            
+            for row in range(1, length + 1):
+                script_lines.append(f"# Row {row}")
+                
+                # Add color change instruction if needed
+                if row in color_change_rows:
+                    script_lines.append(f"# >>> CHANGE YARN COLOR NOW <<<")
+                    script_lines.append(f"WAIT:5")
+                
+                if pattern_type == "circular":
+                    # Circular knitting - always same direction (clockwise)
+                    direction = "CW"
+                    total_steps = width * steps_per_needle
+                    script_lines.append(f"TURN:{total_steps}:{direction}")
+                else:
+                    # Flat knitting - alternate directions for flat panels
+                    direction = "CW" if row % 2 == 1 else "CCW"
+                    total_steps = width * steps_per_needle
+                    script_lines.append(f"TURN:{total_steps}:{direction}")
+                
+                # Add pause between rows
+                if pause > 0 and row < length:
+                    script_lines.append(f"WAIT:{pause}")
+                
+                script_lines.append("")
+            
+            script_lines.append("# Pattern complete")
+            script_lines.append("STATUS")
+            
+            # Display script
+            script_content = "\n".join(script_lines)
+            self.script_text.delete(1.0, tk.END)
+            self.script_text.insert(1.0, script_content)
+            
+            # Draw pattern preview
+            self.draw_pattern_preview(width, length, pattern_type, color_pattern)
+            
+            self.current_pattern = {
+                "name": self.pattern_name_var.get(),
+                "description": self.pattern_desc_var.get(),
+                "width": width,
+                "length": length,
+                "type": pattern_type,
+                "preset": preset,
+                "color_pattern": color_pattern,
+                "speed": speed,
+                "pause": pause,
+                "script": script_content
+            }
+            
+            self.pattern_modified = True
+            self.log_message(f"Pattern generated: {width}x{length} {pattern_type}", "SUCCESS")
+            
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid input values: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error generating pattern: {e}")
+    
+    def draw_pattern_preview(self, width, length, pattern_type, color_pattern):
+        """Draw visual pattern preview for Sentro machine"""
+        self.pattern_canvas.delete("all")
+        
+        if width == 0 or length == 0:
+            return
+        
+        # Calculate cell size
+        canvas_width = self.pattern_canvas.winfo_width() or 400
+        canvas_height = 200
+        
+        cell_width = min(20, (canvas_width - 20) // width)
+        cell_height = 15
+        
+        # Colors for stockinette and color changes
+        base_color = '#e6f3ff'  # Light blue for stockinette
+        alt_color = '#ffe6e6'   # Light red for alternate color
+        
+        # Determine color change rows
+        color_change_rows = set()
+        if color_pattern == "every_row":
+            color_change_rows = set(range(1, length + 1, 2))
+        elif color_pattern == "every_2_rows":
+            color_change_rows = set(range(1, length + 1, 4))
+        elif color_pattern == "every_5_rows":
+            color_change_rows = set(range(4, length + 1, 10))
+        elif color_pattern == "every_10_rows":
+            color_change_rows = set(range(9, length + 1, 20))
+        
+        # Draw pattern
+        for row in range(min(length, canvas_height // cell_height)):
+            y = 10 + row * cell_height
+            
+            # Determine row color
+            color = alt_color if row in color_change_rows else base_color
+            
+            for col in range(width):
+                x = 10 + col * cell_width
+                
+                # Draw cell
+                self.pattern_canvas.create_rectangle(
+                    x, y, x + cell_width, y + cell_height,
+                    fill=color, outline='gray', width=1
+                )
+                
+                # Add knit symbol (all stitches are knit on Sentro)
+                self.pattern_canvas.create_text(
+                    x + cell_width//2, y + cell_height//2,
+                    text="K", font=("Arial", 8)
+                )
+        
+        # Add pattern type indicator
+        type_text = f"Pattern: {pattern_type.title()} Knitting"
+        if pattern_type == "flat":
+            type_text += " (alternating directions)"
+        
+        self.pattern_canvas.create_text(10, canvas_height - 40, text=type_text, anchor=tk.W, font=("Arial", 10, "bold"))
+        
+        # Add legend
+        legend_y = min(length, canvas_height // cell_height) * cell_height + 30
+        self.pattern_canvas.create_rectangle(10, legend_y, 30, legend_y + 15, 
+                                           fill=base_color, outline='gray')
+        self.pattern_canvas.create_text(40, legend_y + 7, text="Main color", anchor=tk.W)
+        
+        if color_change_rows:
+            self.pattern_canvas.create_rectangle(120, legend_y, 140, legend_y + 15, 
+                                               fill=alt_color, outline='gray')
+            self.pattern_canvas.create_text(150, legend_y + 7, text="Alternate color", anchor=tk.W)
+        
+        # Update scroll region
+        self.pattern_canvas.configure(scrollregion=self.pattern_canvas.bbox("all"))
+    
+    def save_pattern(self):
+        """Save current pattern to file"""
+        if not self.current_pattern:
+            messagebox.showwarning("Warning", "No pattern to save. Generate a pattern first.")
+            return
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Save Pattern"
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'w') as f:
+                    json.dump(self.current_pattern, f, indent=2)
+                self.log_message(f"Pattern saved: {filename}", "SUCCESS")
+                self.pattern_modified = False
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not save pattern: {e}")
+    
+    def load_pattern(self):
+        """Load pattern from file"""
+        filename = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Load Pattern"
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    pattern = json.load(f)
+                
+                # Load pattern into GUI
+                self.pattern_name_var.set(pattern.get("name", ""))
+                self.pattern_desc_var.set(pattern.get("description", ""))
+                self.pattern_width_var.set(str(pattern.get("width", 20)))
+                self.pattern_length_var.set(str(pattern.get("length", 10)))
+                self.pattern_type_var.set(pattern.get("type", "circular"))
+                self.preset_var.set(pattern.get("preset", "stockinette"))
+                self.color_change_var.set(pattern.get("color_pattern", "none"))
+                self.script_speed_var.set(str(pattern.get("speed", 1000)))
+                self.pause_var.set(str(pattern.get("pause", 1)))
+                
+                # Load script
+                if "script" in pattern:
+                    self.script_text.delete(1.0, tk.END)
+                    self.script_text.insert(1.0, pattern["script"])
+                
+                self.current_pattern = pattern
+                self.pattern_modified = False
+                
+                # Regenerate preview
+                self.draw_pattern_preview(
+                    pattern.get("width", 20),
+                    pattern.get("length", 10),
+                    pattern.get("type", "circular"),
+                    pattern.get("color_pattern", "none")
+                )
+                
+                self.log_message(f"Pattern loaded: {filename}", "SUCCESS")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not load pattern: {e}")
+    
+    def save_script(self):
+        """Save script to text file"""
+        script_content = self.script_text.get(1.0, tk.END).strip()
+        if not script_content:
+            messagebox.showwarning("Warning", "No script to save.")
+            return
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Save Script"
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'w') as f:
+                    f.write(script_content)
+                self.log_message(f"Script saved: {filename}", "SUCCESS")
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not save script: {e}")
+    
+    def load_script(self):
+        """Load script from text file"""
+        filename = filedialog.askopenfilename(
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Load Script"
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    script_content = f.read()
+                
+                self.script_text.delete(1.0, tk.END)
+                self.script_text.insert(1.0, script_content)
+                self.log_message(f"Script loaded: {filename}", "SUCCESS")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not load script: {e}")
+    
+    def clear_script(self):
+        """Clear the script text area"""
+        self.script_text.delete(1.0, tk.END)
+    
+    def execute_pattern(self):
+        """Execute the current pattern script"""
+        script_content = self.script_text.get(1.0, tk.END).strip()
+        if not script_content:
+            messagebox.showwarning("Warning", "No script to execute. Generate a pattern first.")
+            return
+        
+        if not self.is_connected:
+            messagebox.showerror("Error", "Not connected to Arduino")
+            return
+        
+        # Confirm execution
+        result = messagebox.askyesno(
+            "Execute Pattern", 
+            f"Execute pattern: {self.pattern_name_var.get()}\n\nThis will start the knitting process. Continue?",
+            icon="question"
+        )
+        
+        if result:
+            # Execute script in separate thread
+            def execute_script():
+                lines = script_content.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        if line.startswith('WAIT:'):
+                            wait_time = float(line.split(':')[1])
+                            self.log_message(f"Waiting {wait_time} seconds...", "INFO")
+                            time.sleep(wait_time)
+                        else:
+                            self.send_command(line)
+                            time.sleep(0.1)  # Small delay between commands
+                
+                self.log_message("Pattern execution completed", "SUCCESS")
+            
+            # Start execution thread
+            execution_thread = threading.Thread(target=execute_script, daemon=True)
+            execution_thread.start()
+            
+            self.log_message("Pattern execution started", "SUCCESS")
     
     def on_closing(self):
         """Handle application closing"""
