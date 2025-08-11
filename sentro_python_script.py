@@ -298,12 +298,12 @@ class KnittingMachineController:
         type_frame.pack(fill=tk.X, padx=5, pady=5)
         
         self.pattern_type_var = tk.StringVar(value="circular")
-        tk.Radiobutton(type_frame, text="Circular (tube) - Standard", variable=self.pattern_type_var, 
+        tk.Radiobutton(type_frame, text="Circular (tube)", variable=self.pattern_type_var, 
                       value="circular").pack(anchor=tk.W)
-        tk.Radiobutton(type_frame, text="Flat panel (manual turn)", variable=self.pattern_type_var, 
-                      value="flat", state=tk.DISABLED).pack(anchor=tk.W)
+        tk.Radiobutton(type_frame, text="Flat panel (back & forth)", variable=self.pattern_type_var, 
+                      value="flat").pack(anchor=tk.W)
         
-        tk.Label(type_frame, text="Note: Sentro only does circular knitting", 
+        tk.Label(type_frame, text="Note: All stitches are stockinette (knit only)", 
                 font=("Arial", 8), fg="gray").pack(anchor=tk.W)
         
         # Knitting Patterns (Sentro-specific)
@@ -407,7 +407,7 @@ class KnittingMachineController:
             length = int(self.pattern_length_var.get())
             pattern_type = self.pattern_type_var.get()
             preset = self.preset_var.get()
-            custom = self.custom_pattern_var.get().upper()
+            color_pattern = self.color_change_var.get()
             speed = self.script_speed_var.get()
             pause = float(self.pause_var.get())
             
@@ -420,7 +420,7 @@ class KnittingMachineController:
             script_lines.append(f"# Pattern: {self.pattern_name_var.get()}")
             script_lines.append(f"# Description: {self.pattern_desc_var.get()}")
             script_lines.append(f"# Dimensions: {width} needles x {length} rows")
-            script_lines.append(f"# Type: Circular stockinette (Sentro machine)")
+            script_lines.append(f"# Type: {pattern_type} - stockinette (knit only)")
             script_lines.append(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             script_lines.append("")
             script_lines.append(f"SPEED:{speed}")
@@ -450,10 +450,16 @@ class KnittingMachineController:
                     script_lines.append(f"# >>> CHANGE YARN COLOR NOW <<<")
                     script_lines.append(f"WAIT:5  # Wait for manual color change")
                 
-                # Circular knitting - always same direction (clockwise)
-                direction = "CW"
-                total_steps = width * steps_per_needle
-                script_lines.append(f"TURN:{total_steps}:{direction}")
+                if pattern_type == "circular":
+                    # Circular knitting - always same direction (clockwise)
+                    direction = "CW"
+                    total_steps = width * steps_per_needle
+                    script_lines.append(f"TURN:{total_steps}:{direction}")
+                else:
+                    # Flat knitting - alternate directions for flat panels
+                    direction = "CW" if row % 2 == 1 else "CCW"
+                    total_steps = width * steps_per_needle
+                    script_lines.append(f"TURN:{total_steps}:{direction}")
                 
                 # Add pause between rows
                 if pause > 0 and row < length:
@@ -470,14 +476,14 @@ class KnittingMachineController:
             self.script_text.insert(1.0, script_content)
             
             # Draw pattern preview
-            self.draw_pattern_preview(width, length, color_pattern)
+            self.draw_pattern_preview(width, length, pattern_type, color_pattern)
             
             self.current_pattern = {
                 "name": self.pattern_name_var.get(),
                 "description": self.pattern_desc_var.get(),
                 "width": width,
                 "length": length,
-                "type": "circular",  # Sentro is always circular
+                "type": pattern_type,  # Can be circular OR flat
                 "preset": preset,
                 "color_pattern": color_pattern,
                 "speed": speed,
@@ -493,7 +499,7 @@ class KnittingMachineController:
         except Exception as e:
             messagebox.showerror("Error", f"Error generating pattern: {e}")
     
-    def draw_pattern_preview(self, width, length, color_pattern):
+    def draw_pattern_preview(self, width, length, pattern_type, color_pattern):
         """Draw visual pattern preview for Sentro machine"""
         self.pattern_canvas.delete("all")
         
@@ -543,6 +549,13 @@ class KnittingMachineController:
                     x + cell_width//2, y + cell_height//2,
                     text="K", font=("Arial", 8)
                 )
+        
+        # Add pattern type indicator
+        type_text = f"Pattern: {pattern_type.title()} Knitting"
+        if pattern_type == "flat":
+            type_text += " (alternating directions)"
+        
+        self.pattern_canvas.create_text(10, canvas_height - 40, text=type_text, anchor=tk.W, font=("Arial", 10, "bold"))
         
         # Add legend
         legend_y = min(length, canvas_height // cell_height) * cell_height + 30
@@ -598,7 +611,7 @@ class KnittingMachineController:
                 self.pattern_length_var.set(str(pattern.get("length", 10)))
                 self.pattern_type_var.set(pattern.get("type", "circular"))
                 self.preset_var.set(pattern.get("preset", "stockinette"))
-                self.custom_pattern_var.set(pattern.get("custom_pattern", ""))
+                self.color_change_var.set(pattern.get("color_pattern", "none"))
                 self.script_speed_var.set(str(pattern.get("speed", 1000)))
                 self.pause_var.set(str(pattern.get("pause", 1)))
                 
@@ -615,7 +628,7 @@ class KnittingMachineController:
                     pattern.get("width", 20),
                     pattern.get("length", 10),
                     pattern.get("type", "circular"),
-                    pattern.get("custom_pattern", "K")
+                    pattern.get("color_pattern", "none")
                 )
                 
                 self.log_message(f"Pattern loaded: {filename}", "SUCCESS")
