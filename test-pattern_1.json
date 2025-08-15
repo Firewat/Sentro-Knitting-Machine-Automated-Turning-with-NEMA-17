@@ -1,0 +1,8 @@
+{
+  "name": "New Pattern",
+  "description": "",
+  "width": 20,
+  "length": 10,
+  "type": "circular",
+  "script": "# Generated Pattern: New Pattern\n# Description: \n# Width: 20 needles, Length: 10 rows\n# Type: circular\n\nSPEED:1000\n\n# Row 1\nTURN:10000:CW\nWAIT:1.0\n\n# Row 2\nTURN:10000:CW\nWAIT:1.0\n\n# Row 3\nTURN:10000:CW\nWAIT:1.0\n\n# Row 4\nTURN:10000:CW\nWAIT:1.0\n\n# Row 5\nTURN:10000:CW\nWAIT:1.0\n\n# Row 6\nTURN:10000:CW\nWAIT:1.0\n\n# Row 7\nTURN:10000:CW\nWAIT:1.0\n\n# Row 8\nTURN:10000:CW\nWAIT:1.0\n\n# Row 9\nTURN:10000:CW\nWAIT:1.0\n\n# Row 10\nTURN:10000:CW\nWAIT:1.0\n"
+}

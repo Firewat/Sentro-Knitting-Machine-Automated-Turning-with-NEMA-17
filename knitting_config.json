@@ -1,6 +1,11 @@
 {
-  "steps_per_needle": 10,
-  "default_speed": 1000,
-  "microstepping": 1,
-  "com_port": "AUTO"
+  "steps_per_needle": 1100,
+  "arduino_port": "COM3",
+  "baudrate": 9600,
+  "motor_speed": 800,
+  "microstepping": 32,
+  "chunk_size": 30000,
+  "default_speed": 2000,
+  "com_port": "COM3",
+  "total_needles": 48
 }

@@ -1,0 +1,71 @@
+# SENTRO KNITTING PATTERN
+# ========================
+
+# Pattern Name: test4
+# Description: 
+# Width: 48 needles
+# Length: 10 rows
+# Type: circular
+# Created: 2025-08-12 15:35:02
+
+# SCRIPT:
+# -------
+# Generated Pattern: test4
+# Description: 
+# Width: 48 needles, Length: 10 rows
+# Type: circular
+# Calculation: 500 steps/needle × 48 needles × 10 rows = 240,000 total steps
+
+SPEED:1000
+
+# Row 1
+TURN:24000:CW
+WAIT:1.0
+
+# Row 2
+TURN:24000:CW
+WAIT:1.0
+
+# Row 3
+TURN:24000:CW
+WAIT:1.0
+
+# Row 4
+TURN:24000:CW
+WAIT:1.0
+
+# Row 5
+TURN:24000:CW
+WAIT:1.0
+
+# Row 6
+TURN:24000:CW
+WAIT:1.0
+
+# Row 7
+TURN:24000:CW
+WAIT:1.0
+
+# Row 8
+TURN:24000:CW
+WAIT:1.0
+
+# Row 9
+TURN:24000:CW
+WAIT:1.0
+
+# Row 10
+TURN:24000:CW
+WAIT:1.0
+
+
+# PATTERN DATA (JSON):
+# ==================================================
+# {
+#   "name": "test4",
+#   "description": "",
+#   "width": 48,
+#   "length": 10,
+#   "type": "circular",
+#   "script": "# Generated Pattern: test4\n# Description: \n# Width: 48 needles, Length: 10 rows\n# Type: circular\n# Calculation: 500 steps/needle \u00d7 48 needles \u00d7 10 rows = 240,000 total steps\n\nSPEED:1000\n\n# Row 1\nTURN:24000:CW\nWAIT:1.0\n\n# Row 2\nTURN:24000:CW\nWAIT:1.0\n\n# Row 3\nTURN:24000:CW\nWAIT:1.0\n\n# Row 4\nTURN:24000:CW\nWAIT:1.0\n\n# Row 5\nTURN:24000:CW\nWAIT:1.0\n\n# Row 6\nTURN:24000:CW\nWAIT:1.0\n\n# Row 7\nTURN:24000:CW\nWAIT:1.0\n\n# Row 8\nTURN:24000:CW\nWAIT:1.0\n\n# Row 9\nTURN:24000:CW\nWAIT:1.0\n\n# Row 10\nTURN:24000:CW\nWAIT:1.0\n"
+# }
