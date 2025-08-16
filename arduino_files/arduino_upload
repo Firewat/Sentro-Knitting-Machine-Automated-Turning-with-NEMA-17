@@ -11,18 +11,26 @@ const int stepPin = 2;
 const int dirPin = 3;
 const int enablePin = 4;  // Optional - connect to ENABLE on driver
 
-// HC-SR04 Ultrasonic Sensor pins
-const int trigPin = 7;
-const int echoPin = 8;
+// LM393 Infrared Light Barrier Sensor pins
+const int sensorPin = 7;   // Digital output pin of LM393 sensor
 
 // Motor configuration
 const int stepsPerRevolution = 200;  // Standard NEMA 17 (1.8° per step)
 int microstepping = 1;               // Set based on your driver jumpers (1,2,4,8,16,32)
 int motorSpeed = 1000;               // Delay in microseconds between steps (lower = faster)
 
-// HC-SR04 configuration
-long distance = 0;                   // Current distance reading in cm
+// Needle counting configuration
 int needleCount = 0;                 // Count of detected needles
+bool lastSensorState = HIGH;         // Previous sensor state (HIGH = no obstruction)
+bool sensorTriggered = false;        // Flag to prevent multiple counts per needle
+unsigned long lastTriggerTime = 0;   // Debounce timing
+const unsigned long debounceDelay = 50; // Minimum time between needle detections (ms)
+
+// Needle target mode variables
+bool needleTargetMode = false;       // Flag for needle target mode
+int needleTarget = 0;                // Target needle count
+int needleStartCount = 0;            // Starting needle count for target mode
+bool targetModeClockwise = true;     // Direction for target mode
 
 // Variables for serial communication - use char array instead of String
 char inputBuffer[32];  // Reduced buffer size
@@ -35,9 +43,8 @@ void setup() {
   pinMode(dirPin, OUTPUT);
   pinMode(enablePin, OUTPUT);
   
-  // Initialize HC-SR04 pins
-  pinMode(trigPin, OUTPUT);
-  pinMode(echoPin, INPUT);
+  // Initialize LM393 sensor pin
+  pinMode(sensorPin, INPUT);
   
   // Enable the motor driver (LOW = enabled)
   digitalWrite(enablePin, LOW);
@@ -46,8 +53,11 @@ void setup() {
   Serial.begin(9600);
   Serial.println(F("=== Sentro Controller ==="));
   Serial.println(F("Arduino ready"));
-  Serial.println(F("HC-SR04 initialized"));
-  Serial.println(F("Commands: TURN/REV/SPEED/MICRO/WAIT/DISTANCE/NEEDLE_COUNT/RESET_COUNT/STOP/STATUS"));
+  Serial.println(F("LM393 Infrared Needle Counter initialized"));
+  Serial.println(F("Commands: TURN/REV/SPEED/MICRO/WAIT/NEEDLE_COUNT/RESET_COUNT/NEEDLE_TARGET/STOP/STATUS"));
+  
+  // Initialize sensor state
+  lastSensorState = digitalRead(sensorPin);
   
   // Clear input buffer
   memset(inputBuffer, 0, sizeof(inputBuffer));
@@ -56,6 +66,9 @@ void setup() {
 }
 
 void loop() {
+  // Check for needle detection
+  checkNeedleDetection();
+  
   // Check for serial commands
   if (stringComplete) {
     processCommand();
@@ -215,23 +228,10 @@ void processCommand() {
     Serial.println(microstepping);
     Serial.print(F("Speed: "));
     Serial.println(motorSpeed);
-    Serial.print(F("Distance: "));
-    Serial.print(measureDistance());
-    Serial.println(F(" cm"));
+    Serial.print(F("Sensor: "));
+    Serial.println(digitalRead(sensorPin) ? F("CLEAR") : F("BLOCKED"));
     Serial.print(F("Needles: "));
     Serial.println(needleCount);
-    Serial.println(F("OK"));
-  }
-  
-  else if (strcmp(inputBuffer, "DISTANCE") == 0) {
-    long currentDistance = measureDistance();
-    if (currentDistance >= 0) {
-      Serial.print(F("Distance: "));
-      Serial.print(currentDistance);
-      Serial.println(F(" cm"));
-    } else {
-      Serial.println(F("Distance: ERROR"));
-    }
     Serial.println(F("OK"));
   }
   
@@ -243,8 +243,47 @@ void processCommand() {
   
   else if (strcmp(inputBuffer, "RESET_COUNT") == 0) {
     needleCount = 0;
+    needleTargetMode = false;  // Stop any target mode
     Serial.println(F("Count reset"));
     Serial.println(F("OK"));
+  }
+  
+  else if (strncmp(inputBuffer, "NEEDLE_TARGET:", 14) == 0) {
+    // Parse NEEDLE_TARGET:count:direction
+    char* countStr = inputBuffer + 14;
+    char* dirStr = strchr(countStr, ':');
+    
+    if (dirStr != NULL) {
+      *dirStr = '\0';  // Null terminate count string
+      dirStr++;        // Move to direction
+      
+      int targetCount = atoi(countStr);
+      bool isClockwise = (strcmp(dirStr, "CW") == 0);
+      
+      if (targetCount > 0 && (strcmp(dirStr, "CW") == 0 || strcmp(dirStr, "CCW") == 0)) {
+        needleTarget = targetCount;
+        needleStartCount = needleCount;
+        targetModeClockwise = isClockwise;
+        needleTargetMode = true;
+        
+        Serial.print(F("Needle target mode: "));
+        Serial.print(targetCount);
+        Serial.print(F(" needles "));
+        Serial.print(dirStr);
+        Serial.print(F(" (starting from "));
+        Serial.print(needleStartCount);
+        Serial.println(F(")"));
+        
+        // Start motor movement
+        turnUntilNeedleTarget();
+        
+        Serial.println(F("DONE"));
+      } else {
+        Serial.println(F("ERROR: Invalid NEEDLE_TARGET"));
+      }
+    } else {
+      Serial.println(F("ERROR: Invalid NEEDLE_TARGET format"));
+    }
   }
   
   else {
@@ -262,6 +301,9 @@ void turnSteps(int steps, boolean clockwise) {
   
   // Perform steps with progress indication
   for (int i = 0; i < steps; i++) {
+    // Check for needle detection during motor movement
+    checkNeedleDetection();
+    
     digitalWrite(stepPin, HIGH);
     delayMicroseconds(motorSpeed / 2);
     digitalWrite(stepPin, LOW);
@@ -299,38 +341,103 @@ void turnSteps(int steps, boolean clockwise) {
   }
 }
 
-long measureDistance() {
-  // Clear the trigPin
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
+void checkNeedleDetection() {
+  bool currentSensorState = digitalRead(sensorPin);
+  unsigned long currentTime = millis();
   
-  // Set the trigPin HIGH for 10 microseconds
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  
-  // Read the echoPin, returns the sound wave travel time in microseconds
-  long duration = pulseIn(echoPin, HIGH, 30000); // 30ms timeout
-  
-  // Calculate the distance in centimeters
-  long distance_cm;
-  
-  if (duration == 0) {
-    // Timeout occurred
-    Serial.println(F("DEBUG: HC-SR04 timeout"));
-    distance_cm = -1;
-  } else if (duration < 150) {
-    // Too close reading
-    Serial.println(F("DEBUG: HC-SR04 too close"));
-    distance_cm = -2;
-  } else {
-    distance_cm = (duration * 343) / 20000;  // Simplified calculation, avoid float
-    Serial.print(F("DEBUG: duration="));
-    Serial.print(duration);
-    Serial.print(F("μs, dist="));
-    Serial.print(distance_cm);
-    Serial.println(F("cm"));
+  // Detect transition from HIGH to LOW (needle blocking sensor)
+  if (lastSensorState == HIGH && currentSensorState == LOW && !sensorTriggered) {
+    // Check debounce timing
+    if (currentTime - lastTriggerTime > debounceDelay) {
+      needleCount++;
+      sensorTriggered = true;
+      lastTriggerTime = currentTime;
+      
+      // Send needle detection notification
+      Serial.print(F("NEEDLE_DETECTED: "));
+      Serial.println(needleCount);
+    }
   }
   
-  return distance_cm;
+  // Reset trigger flag when sensor clears
+  if (currentSensorState == HIGH && sensorTriggered) {
+    sensorTriggered = false;
+  }
+  
+  lastSensorState = currentSensorState;
+}
+
+void turnUntilNeedleTarget() {
+  // Set direction
+  digitalWrite(dirPin, targetModeClockwise ? HIGH : LOW);
+  
+  // Small delay to ensure direction is set
+  delayMicroseconds(10);
+  
+  int targetNeedlesFromStart = needleTarget;
+  int currentNeedlesFromStart = needleCount - needleStartCount;
+  
+  Serial.print(F("Target: "));
+  Serial.print(targetNeedlesFromStart);
+  Serial.print(F(" needles, Current progress: "));
+  Serial.println(currentNeedlesFromStart);
+  
+  // Continue until target is reached
+  while (needleTargetMode && (needleCount - needleStartCount) < targetNeedlesFromStart) {
+    // Check for needle detection
+    checkNeedleDetection();
+    
+    // Perform one step
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(motorSpeed / 2);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(motorSpeed / 2);
+    
+    // Check for emergency stop every 200 steps
+    static int stepCounter = 0;
+    stepCounter++;
+    if (stepCounter % 200 == 0) {
+      if (Serial.available()) {
+        char emergencyBuffer[8];
+        int emergencyIndex = 0;
+        
+        while (Serial.available() && emergencyIndex < 7) {
+          char c = Serial.read();
+          if (c >= 'a' && c <= 'z') c = c - 32;  // Convert to uppercase
+          emergencyBuffer[emergencyIndex++] = c;
+          if (c == '\n' || c == '\r') break;
+        }
+        emergencyBuffer[emergencyIndex] = '\0';
+        
+        if (strcmp(emergencyBuffer, "STOP") == 0) {
+          needleTargetMode = false;
+          Serial.println(F("STOP command received - target mode cancelled"));
+          return;
+        }
+      }
+      
+      // Progress update every 1000 steps
+      if (stepCounter % 1000 == 0) {
+        int currentProgress = needleCount - needleStartCount;
+        Serial.print(F("Needle progress: "));
+        Serial.print(currentProgress);
+        Serial.print(F("/"));
+        Serial.println(targetNeedlesFromStart);
+      }
+    }
+    
+    // Safety timeout - prevent infinite loop (max ~100,000 steps)
+    if (stepCounter > 100000) {
+      needleTargetMode = false;
+      Serial.println(F("Safety timeout - stopping needle target mode"));
+      return;
+    }
+  }
+  
+  needleTargetMode = false;
+  Serial.print(F("Target reached! Final count: "));
+  Serial.print(needleCount);
+  Serial.print(F(" ("));
+  Serial.print(needleCount - needleStartCount);
+  Serial.println(F(" needles from start)"));
 }

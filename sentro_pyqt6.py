@@ -2,10 +2,12 @@
 """
 Sentro Knitting Machine Controller - PyQt6 Version
 Modern, Professional GUI for Arduino-based knitting machine control
+Focus: Needle-based pattern creation and execution
 """
 
 import sys
 import json
+import os
 import serial
 import serial.tools.list_ports
 import time
@@ -13,11 +15,73 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+class PatternStep:
+    """Represents a single step in a knitting pattern"""
+    def __init__(self, needles: int, direction: str, rows: int = 1, description: str = ""):
+        self.needles = needles  # Needles per row
+        self.direction = direction  # "CW" or "CCW"  
+        self.rows = rows  # Number of rows
+        self.description = description or f"{needles} needles × {rows} rows {direction}"
+        
+    def get_total_needles(self) -> int:
+        """Calculate total needles for this step (needles per row × number of rows)"""
+        return self.needles * self.rows
+        
+    def to_dict(self) -> Dict:
+        return {
+            "needles": self.needles,
+            "direction": self.direction,
+            "rows": self.rows,
+            "description": self.description
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict):
+        # Handle backward compatibility with old repeat_count field
+        rows = data.get("rows", data.get("repeat_count", 1))
+        step = cls(data["needles"], data["direction"], rows, data.get("description", ""))
+        return step
+
+class KnittingPattern:
+    """Represents a complete knitting pattern"""
+    def __init__(self, name: str = "New Pattern"):
+        self.name = name
+        self.steps: List[PatternStep] = []
+        self.description = ""
+        self.repetitions = 1  # Number of times to repeat the entire pattern
+    
+    def add_step(self, step: PatternStep):
+        self.steps.append(step)
+    
+    def remove_step(self, index: int):
+        if 0 <= index < len(self.steps):
+            del self.steps[index]
+    
+    def get_total_needles(self) -> int:
+        return sum(step.get_total_needles() for step in self.steps) * self.repetitions
+    
+    def to_dict(self) -> Dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "repetitions": self.repetitions,
+            "steps": [step.to_dict() for step in self.steps]
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict):
+        pattern = cls(data.get("name", "Unnamed Pattern"))
+        pattern.description = data.get("description", "")
+        pattern.repetitions = data.get("repetitions", 1)
+        pattern.steps = [PatternStep.from_dict(step_data) for step_data in data.get("steps", [])]
+        return pattern
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QGridLayout, QLabel, QPushButton, QLineEdit, QTextEdit, QComboBox, 
     QSpinBox, QProgressBar, QFileDialog, QMessageBox, QTabWidget,
-    QScrollArea, QFrame, QSplitter, QGroupBox, QDialog, QDialogButtonBox
+    QScrollArea, QFrame, QSplitter, QGroupBox, QDialog, QDialogButtonBox,
+    QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSize, pyqtSlot
@@ -80,8 +144,30 @@ class SerialWorker(QThread):
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
             
-    def send_distance_command_lightweight(self):
-        """Send distance command with minimal blocking"""
+    def send_motor_command_with_monitoring(self, command: str):
+        """Send motor command while allowing needle monitoring to continue"""
+        if not self.serial_port or not self.serial_port.is_open:
+            self.error_occurred.emit("Arduino not connected")
+            return False
+            
+        try:
+            print(f"DEBUG: Sending motor command with monitoring: {command}")
+            
+            # Send command without clearing buffers (to preserve needle responses)
+            self.serial_port.write(f"{command}\n".encode('ascii'))
+            self.serial_port.flush()
+            
+            # Signal that we should start reading responses in background
+            self.response_received.emit("MOTOR_COMMAND_SENT")
+            
+            return True
+            
+        except Exception as e:
+            self.error_occurred.emit(f"Motor command failed: {str(e)}")
+            return False
+    
+    def send_needle_command_lightweight(self):
+        """Send needle count command with minimal blocking"""
         if not self.serial_port or not self.serial_port.is_open:
             return False
             
@@ -91,15 +177,15 @@ class SerialWorker(QThread):
                 self.serial_port.reset_input_buffer()
             
             # Send command quickly
-            self.serial_port.write(b"DISTANCE\n")
+            self.serial_port.write(b"NEEDLE_COUNT\n")
             self.serial_port.flush()
             return True
         except Exception as e:
-            self.error_occurred.emit(f"Distance command failed: {str(e)}")
+            self.error_occurred.emit(f"Needle command failed: {str(e)}")
             return False
     
-    def check_distance_response(self):
-        """Check for distance response without blocking"""
+    def check_needle_response(self):
+        """Check for any Arduino response without blocking"""
         if not self.serial_port or not self.serial_port.is_open:
             return None
             
@@ -449,13 +535,24 @@ class KnittingMachineGUI(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.config_file = "knitting_config.json"
+        self.config_file = "knitting_config.json" 
+        self.patterns_file = "knitting_patterns.json"
         self.config = self.load_config()
         
         # Initialize serial worker
         chunk_size = self.config.get("chunk_size", 32000)
         self.serial_worker = SerialWorker(chunk_size)
         self.setup_signals()
+        
+        # Initialize needle count window reference
+        self.needle_window = None
+        
+        # Initialize pattern management
+        self.current_pattern = KnittingPattern()
+        self.saved_patterns: List[KnittingPattern] = self.load_patterns()
+        self.pattern_execution_index = 0  # Track current step in pattern execution
+        self.pattern_repetition_index = 0  # Track current pattern repetition
+        self.pattern_execution_stopped = False  # Flag to immediately stop pattern execution
         
         # Initialize UI
         self.init_ui()
@@ -465,16 +562,17 @@ class KnittingMachineGUI(QMainWindow):
         # Progress dialog
         self.progress_dialog: Optional[ProgressDialog] = None
         
-        # Distance monitoring timer
-        self.distance_timer = QTimer()
-        self.distance_timer.timeout.connect(self.update_distance_reading)
-        self.distance_monitoring_enabled = False
-        self.distance_request_pending = False  # Prevent overlapping requests
+        # Needle counting timer
+        self.needle_timer = QTimer()
+        self.needle_timer.timeout.connect(self.update_needle_reading)
+        self.needle_monitoring_enabled = False
+        self.needle_request_pending = False  # Prevent overlapping requests
+        self.concurrent_monitoring = False  # Flag for concurrent operations
         
         # Response checker timer for non-blocking serial reading
         self.response_checker = QTimer()
         self.response_checker.timeout.connect(self.check_for_responses)
-        self.response_checker.start(50)  # Check every 50ms for responses
+        self.response_checker.start(30)  # Check every 30ms for responses (faster during concurrent ops)
         
         # UI refresh timer for smoother updates
         self.ui_refresh_timer = QTimer()
@@ -489,7 +587,8 @@ class KnittingMachineGUI(QMainWindow):
             "baudrate": 9600,
             "motor_speed": 1000,
             "microstepping": 1,
-            "chunk_size": 32000
+            "chunk_size": 32000,
+            "theme": "Pink/Rose"
         }
         
         try:
@@ -508,6 +607,27 @@ class KnittingMachineGUI(QMainWindow):
                 json.dump(self.config, f, indent=2)
         except Exception as e:
             QMessageBox.warning(self, "Config Error", f"Failed to save config: {str(e)}")
+    
+    def load_patterns(self) -> List[KnittingPattern]:
+        """Load saved patterns from file"""
+        try:
+            with open(self.patterns_file, 'r') as f:
+                patterns_data = json.load(f)
+                return [KnittingPattern.from_dict(pattern_data) for pattern_data in patterns_data]
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            print(f"Error loading patterns: {e}")
+            return []
+    
+    def save_patterns(self):
+        """Save patterns to file"""
+        try:
+            patterns_data = [pattern.to_dict() for pattern in self.saved_patterns]
+            with open(self.patterns_file, 'w') as f:
+                json.dump(patterns_data, f, indent=2)
+        except Exception as e:
+            QMessageBox.warning(self, "Patterns Error", f"Failed to save patterns: {str(e)}")
             
     def setup_signals(self):
         """Setup signal connections"""
@@ -518,8 +638,8 @@ class KnittingMachineGUI(QMainWindow):
         
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("Sentro Knitting Machine Controller")
-        self.setMinimumSize(1000, 700)
+        self.setWindowTitle("Sentro Knitting Machine - Pattern Builder & Controller")
+        self.setMinimumSize(1200, 800)
         
         # Central widget
         central_widget = QWidget()
@@ -538,8 +658,8 @@ class KnittingMachineGUI(QMainWindow):
         # Right panel - Console and status
         self.create_console_panel(splitter)
         
-        # Set splitter proportions
-        splitter.setSizes([600, 400])
+        # Set splitter proportions (75% control panel, 25% console)
+        splitter.setSizes([750, 250])
         
     def create_control_panel(self, parent):
         """Create the main control panel"""
@@ -564,7 +684,7 @@ class KnittingMachineGUI(QMainWindow):
         conn_layout.addWidget(self.connect_btn, 1, 0, 1, 3)
         
         # Connection status indicator
-        self.status_label = QLabel("❌ Disconnected")
+        self.status_label = QLabel("Disconnected")
         self.status_label.setStyleSheet("color: #F44336; font-weight: bold; padding: 5px;")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         conn_layout.addWidget(self.status_label, 2, 0, 1, 3)
@@ -584,16 +704,13 @@ class KnittingMachineGUI(QMainWindow):
         
         layout.addWidget(settings_group)
         
-        # Tab widget for different functions
+        # Tab widget for different functions - Reordered for needle-focused workflow
         self.tab_widget = QTabWidget()
         
-        # Create Script tab
-        self.create_script_tab()
+        # Pattern Builder tab (MAIN FOCUS)
+        self.create_pattern_builder_tab()
         
-        # Upload Script tab
-        self.create_upload_tab()
-        
-        # Manual Control tab
+        # Manual Control tab (with both needles and steps)
         self.create_manual_tab()
         
         # Settings tab
@@ -602,111 +719,218 @@ class KnittingMachineGUI(QMainWindow):
         layout.addWidget(self.tab_widget)
         
         parent.addWidget(control_widget)
-        
-    def create_script_tab(self):
-        """Create the script creation tab"""
+    
+    def create_pattern_builder_tab(self):
+        """Create the main Pattern Builder tab - needle-focused workflow"""
         widget = QWidget()
-        layout = QVBoxLayout(widget)
+        main_layout = QVBoxLayout(widget)
         
-        # Script parameters
-        params_group = QGroupBox("Script Parameters")
-        params_layout = QGridLayout(params_group)
+        # Make the entire tab scrollable
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
-        params_layout.addWidget(QLabel("Number of Rows:"), 0, 0)
-        self.rows_spinbox = QSpinBox()
-        self.rows_spinbox.setRange(1, 1000)
-        self.rows_spinbox.setValue(10)
-        params_layout.addWidget(self.rows_spinbox, 0, 1)
+        scroll_widget = QWidget()
+        layout = QVBoxLayout(scroll_widget)
         
-        params_layout.addWidget(QLabel("Needles per Row:"), 1, 0)
-        self.needles_spinbox = QSpinBox()
-        self.needles_spinbox.setRange(1, 200)
-        self.needles_spinbox.setValue(48)
-        params_layout.addWidget(self.needles_spinbox, 1, 1)
+        # Pattern Information Section
+        info_group = QGroupBox("Pattern Information")
+        info_layout = QGridLayout(info_group)
         
-        layout.addWidget(params_group)
+        info_layout.addWidget(QLabel("Pattern Name:"), 0, 0)
+        self.pattern_name_input = QLineEdit(self.current_pattern.name)
+        self.pattern_name_input.setPlaceholderText("Enter a descriptive name for your knitting pattern...")
+        self.pattern_name_input.textChanged.connect(self.on_pattern_name_changed)
+        info_layout.addWidget(self.pattern_name_input, 0, 1)
         
-        # Direction settings
-        direction_group = QGroupBox("Direction Pattern")
-        direction_layout = QVBoxLayout(direction_group)
+        info_layout.addWidget(QLabel("Description (optional):"), 1, 0)
+        self.pattern_description = QTextEdit()
+        self.pattern_description.setMaximumHeight(60)
+        self.pattern_description.setPlaceholderText("Add notes about yarn, stitch patterns, or special instructions...")
+        self.pattern_description.setPlainText(self.current_pattern.description)
+        self.pattern_description.textChanged.connect(self.on_pattern_description_changed)
+        info_layout.addWidget(self.pattern_description, 1, 1)
         
-        self.direction_combo = QComboBox()
-        self.direction_combo.addItems(["Alternating (CW/CCW)", "All Clockwise", "All Counter-Clockwise"])
-        direction_layout.addWidget(self.direction_combo)
-        
-        layout.addWidget(direction_group)
-        
-        # Generate and save buttons
-        button_layout = QHBoxLayout()
-        
-        self.generate_btn = QPushButton("Generate Script")
-        self.generate_btn.clicked.connect(self.generate_script)
-        button_layout.addWidget(self.generate_btn)
-        
-        self.save_script_btn = QPushButton("Save Script")
-        self.save_script_btn.clicked.connect(self.save_script)
-        button_layout.addWidget(self.save_script_btn)
-        
-        layout.addLayout(button_layout)
-        
-        # Script preview
-        preview_group = QGroupBox("Script Preview")
-        preview_layout = QVBoxLayout(preview_group)
-        
-        self.script_preview = QTextEdit()
-        self.script_preview.setMaximumHeight(200)
-        self.script_preview.setReadOnly(True)
-        preview_layout.addWidget(self.script_preview)
-        
-        layout.addWidget(preview_group)
-        
-        self.tab_widget.addTab(widget, "Create Script")
-        
-    def create_upload_tab(self):
-        """Create the script upload tab"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        # File selection
-        file_group = QGroupBox("Script File")
-        file_layout = QHBoxLayout(file_group)
-        
-        self.file_path_edit = QLineEdit()
-        self.file_path_edit.setReadOnly(True)
-        file_layout.addWidget(self.file_path_edit)
-        
-        self.browse_btn = QPushButton("Browse")
-        self.browse_btn.clicked.connect(self.browse_script_file)
-        file_layout.addWidget(self.browse_btn)
-        
-        layout.addWidget(file_group)
-        
-        # Script info
-        info_group = QGroupBox("Script Information")
-        info_layout = QVBoxLayout(info_group)
-        
-        self.script_info = QLabel("No script loaded")
-        info_layout.addWidget(self.script_info)
+        info_layout.addWidget(QLabel("Pattern Repetitions:"), 2, 0)
+        self.pattern_repetitions_input = QSpinBox()
+        self.pattern_repetitions_input.setMinimum(1)
+        self.pattern_repetitions_input.setMaximum(1000)
+        self.pattern_repetitions_input.setValue(self.current_pattern.repetitions)
+        self.pattern_repetitions_input.setToolTip("Number of times to repeat the entire pattern")
+        self.pattern_repetitions_input.valueChanged.connect(self.on_pattern_repetitions_changed)
+        info_layout.addWidget(self.pattern_repetitions_input, 2, 1)
         
         layout.addWidget(info_group)
         
-        # Upload button
-        self.upload_btn = QPushButton("Upload and Execute Script")
-        self.upload_btn.clicked.connect(self.upload_script)
-        self.upload_btn.setEnabled(False)
-        layout.addWidget(self.upload_btn)
+        # Step Builder Section
+        step_group = QGroupBox("Add Pattern Step")
+        step_layout = QGridLayout(step_group)
         
-        # Script content
-        content_group = QGroupBox("Script Content")
-        content_layout = QVBoxLayout(content_group)
+        step_layout.addWidget(QLabel("Needles:"), 0, 0)
+        self.step_needles_input = QSpinBox()
+        self.step_needles_input.setMinimum(1)
+        self.step_needles_input.setMaximum(10000) 
+        self.step_needles_input.setValue(48)
+        self.step_needles_input.setStyleSheet("font-size: 16px; font-weight: bold;")
+        step_layout.addWidget(self.step_needles_input, 0, 1)
         
-        self.script_content = QTextEdit()
-        self.script_content.setReadOnly(True)
-        content_layout.addWidget(self.script_content)
+        step_layout.addWidget(QLabel("Direction:"), 0, 2)
+        self.step_direction_combo = QComboBox()
+        self.step_direction_combo.addItems(["CW", "CCW"])
+        self.step_direction_combo.setStyleSheet("font-size: 16px;")
+        step_layout.addWidget(self.step_direction_combo, 0, 3)
         
-        layout.addWidget(content_group)
+        step_layout.addWidget(QLabel("Rows:"), 1, 0)
+        self.step_rows_input = QSpinBox()
+        self.step_rows_input.setMinimum(1)
+        self.step_rows_input.setMaximum(1000)
+        self.step_rows_input.setValue(1)
+        self.step_rows_input.setToolTip("Number of rows (each row = one full rotation)")
+        step_layout.addWidget(self.step_rows_input, 1, 1)
         
-        self.tab_widget.addTab(widget, "Upload Script")
+        step_layout.addWidget(QLabel("Description:"), 1, 2)
+        self.step_description_input = QLineEdit()
+        self.step_description_input.setPlaceholderText("Optional description...")
+        step_layout.addWidget(self.step_description_input, 1, 3)
+        
+        # Add step button
+        self.add_step_btn = QPushButton("Add Step to Pattern")
+        self.add_step_btn.clicked.connect(self.add_pattern_step)
+        self.add_step_btn.setMinimumHeight(40)
+        self.add_step_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #C8E6C9; font-size: 14px; }")
+        step_layout.addWidget(self.add_step_btn, 2, 0, 1, 4)
+        
+        layout.addWidget(step_group)
+        
+        # Current Pattern Steps List
+        steps_group = QGroupBox("Current Pattern Steps")
+        steps_layout = QVBoxLayout(steps_group)
+        
+        # Pattern steps list widget
+        self.pattern_steps_list = QListWidget()
+        self.pattern_steps_list.setMinimumHeight(200)
+        self.pattern_steps_list.setStyleSheet("font-size: 14px;")
+        steps_layout.addWidget(self.pattern_steps_list)
+        
+        # Pattern steps control buttons
+        steps_controls_layout = QHBoxLayout()
+        
+        self.edit_step_btn = QPushButton("Edit Selected")
+        self.edit_step_btn.clicked.connect(self.edit_selected_step)
+        steps_controls_layout.addWidget(self.edit_step_btn)
+        
+        self.delete_step_btn = QPushButton("Delete Selected")
+        self.delete_step_btn.clicked.connect(self.delete_selected_step)
+        steps_controls_layout.addWidget(self.delete_step_btn)
+        
+        self.move_up_btn = QPushButton("Move Up")
+        self.move_up_btn.clicked.connect(self.move_step_up)
+        steps_controls_layout.addWidget(self.move_up_btn)
+        
+        self.move_down_btn = QPushButton("Move Down")
+        self.move_down_btn.clicked.connect(self.move_step_down)
+        steps_controls_layout.addWidget(self.move_down_btn)
+        
+        steps_layout.addLayout(steps_controls_layout)
+        
+        layout.addWidget(steps_group)
+        
+        # Pattern Summary
+        summary_group = QGroupBox("Pattern Summary")
+        summary_layout = QVBoxLayout(summary_group)
+        
+        self.pattern_summary_label = QLabel()
+        self.pattern_summary_label.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px;")
+        self.pattern_summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        summary_layout.addWidget(self.pattern_summary_label)
+        
+        layout.addWidget(summary_group)
+        
+        # Pattern Management Buttons
+        management_group = QGroupBox("Pattern Management")
+        management_layout = QGridLayout(management_group)
+        
+        self.save_pattern_btn = QPushButton("Save Pattern")
+        self.save_pattern_btn.clicked.connect(self.save_current_pattern)
+        self.save_pattern_btn.setMinimumHeight(40)
+        self.save_pattern_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #BBDEFB; }")
+        management_layout.addWidget(self.save_pattern_btn, 0, 0)
+        
+        self.load_pattern_btn = QPushButton("Load Pattern")
+        self.load_pattern_btn.clicked.connect(self.load_pattern_dialog)
+        self.load_pattern_btn.setMinimumHeight(40)
+        management_layout.addWidget(self.load_pattern_btn, 0, 1)
+        
+        self.new_pattern_btn = QPushButton("New Pattern")
+        self.new_pattern_btn.clicked.connect(self.new_pattern)
+        self.new_pattern_btn.setMinimumHeight(40)
+        management_layout.addWidget(self.new_pattern_btn, 0, 2)
+        
+        self.execute_pattern_btn = QPushButton("Execute Pattern")
+        self.execute_pattern_btn.clicked.connect(self.execute_current_pattern)
+        self.execute_pattern_btn.setMinimumHeight(50)
+        self.execute_pattern_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4caf50;
+                color: white;
+                font-weight: bold;
+                font-size: 16px;
+                border: none;
+                border-radius: 6px;
+                padding: 12px 20px;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+            }
+            QPushButton:disabled {
+                background-color: #e0e0e0;
+                color: #9e9e9e;
+            }
+        """)
+        management_layout.addWidget(self.execute_pattern_btn, 1, 0, 1, 2)  # Span 2 columns instead of 3
+        
+        # Add Stop Machine button
+        self.stop_machine_btn = QPushButton("STOP MACHINE")
+        self.stop_machine_btn.clicked.connect(self.stop_machine_immediately)
+        self.stop_machine_btn.setMinimumHeight(50)
+        self.stop_machine_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                font-weight: bold;
+                font-size: 16px;
+                border: none;
+                border-radius: 6px;
+                padding: 12px 20px;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+            QPushButton:pressed {
+                background-color: #b71c1c;
+            }
+            QPushButton:disabled {
+                background-color: #e0e0e0;
+                color: #9e9e9e;
+            }
+        """)
+        management_layout.addWidget(self.stop_machine_btn, 1, 2)  # Place in column 2
+        
+        layout.addWidget(management_group)
+        
+        scroll_area.setWidget(scroll_widget)
+        main_layout.addWidget(scroll_area)
+        
+        self.tab_widget.addTab(widget, "Pattern Builder")
+        
+        # Initialize the pattern display
+        self.update_pattern_display()
         
     def create_manual_tab(self):
         """Create the manual control tab"""
@@ -758,47 +982,127 @@ class KnittingMachineGUI(QMainWindow):
         self.manual_turn_btn.setStyleSheet("QPushButton { font-weight: bold; }")
         manual_layout.addWidget(self.manual_turn_btn, 3, 0, 1, 2)
         
+        # Concurrent turn button (turn + monitor needles)
+        self.concurrent_turn_btn = QPushButton("Turn + Monitor Needles")
+        self.concurrent_turn_btn.clicked.connect(self.manual_turn_with_monitoring)
+        self.concurrent_turn_btn.setMinimumHeight(40)
+        self.concurrent_turn_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #E1BEE7; }")
+        manual_layout.addWidget(self.concurrent_turn_btn, 4, 0, 1, 2)
+        
         layout.addWidget(manual_group)
         
-        # HC-SR04 Sensor Controls
-        sensor_group = QGroupBox("HC-SR04 Ultrasonic Sensor")
+        # LM393 Infrared Needle Counter Controls
+        sensor_group = QGroupBox("LM393 Infrared Needle Counter")
         sensor_layout = QGridLayout(sensor_group)
         sensor_layout.setSpacing(10)
-        
-        self.distance_btn = QPushButton("Get Distance Reading")
-        self.distance_btn.clicked.connect(lambda: self.send_command("DISTANCE"))
-        self.distance_btn.setMinimumHeight(35)
-        sensor_layout.addWidget(self.distance_btn, 0, 0)
-        
-        self.monitor_distance_btn = QPushButton("Start Distance Monitoring")
-        self.monitor_distance_btn.clicked.connect(self.toggle_distance_monitoring)
-        self.monitor_distance_btn.setMinimumHeight(35)
-        sensor_layout.addWidget(self.monitor_distance_btn, 0, 1)
-        
-        # Add sensor test button
-        self.test_sensor_btn = QPushButton("Test Sensor (5 readings)")
-        self.test_sensor_btn.clicked.connect(self.test_sensor)
-        self.test_sensor_btn.setMinimumHeight(35)
-        sensor_layout.addWidget(self.test_sensor_btn, 1, 0, 1, 2)
-        
-        layout.addWidget(sensor_group)
-        
-        # Needle Detection Controls
-        needle_group = QGroupBox("Needle Detection")
-        needle_layout = QGridLayout(needle_group)
-        needle_layout.setSpacing(10)
         
         self.needle_count_btn = QPushButton("Get Needle Count")
         self.needle_count_btn.clicked.connect(lambda: self.send_command("NEEDLE_COUNT"))
         self.needle_count_btn.setMinimumHeight(35)
-        needle_layout.addWidget(self.needle_count_btn, 0, 0)
+        sensor_layout.addWidget(self.needle_count_btn, 0, 0)
+        
+        self.monitor_needle_btn = QPushButton("Start Needle Monitoring")
+        self.monitor_needle_btn.clicked.connect(self.toggle_needle_monitoring)
+        self.monitor_needle_btn.setMinimumHeight(35)
+        sensor_layout.addWidget(self.monitor_needle_btn, 0, 1)
         
         self.reset_count_btn = QPushButton("Reset Needle Count")
         self.reset_count_btn.clicked.connect(lambda: self.send_command("RESET_COUNT"))
         self.reset_count_btn.setMinimumHeight(35)
-        needle_layout.addWidget(self.reset_count_btn, 0, 1)
+        sensor_layout.addWidget(self.reset_count_btn, 1, 0)
         
-        layout.addWidget(needle_group)
+        # Show needle window button
+        self.show_needle_window_btn = QPushButton("Show Needle Window")
+        self.show_needle_window_btn.clicked.connect(self.show_needle_count_window)
+        self.show_needle_window_btn.setMinimumHeight(35)
+        sensor_layout.addWidget(self.show_needle_window_btn, 1, 1)
+        
+        # Real-time needle count display
+        needle_display_frame = QFrame()
+        needle_display_frame.setFrameStyle(QFrame.Shape.Box)
+        needle_display_frame.setStyleSheet("QFrame { background-color: #F5F5F5; border: 2px solid #DDD; border-radius: 5px; }")
+        needle_display_layout = QVBoxLayout(needle_display_frame)
+        
+        needle_label = QLabel("Needles Counted:")
+        needle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        needle_label.setStyleSheet("font-weight: bold; color: #333;")
+        needle_display_layout.addWidget(needle_label)
+        
+        self.current_needle_display = QLabel("0")
+        self.current_needle_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #FF6B9D; padding: 15px;")
+        needle_display_layout.addWidget(self.current_needle_display)
+        
+        # Add sensor status indicator
+        self.sensor_status_label = QLabel("Status: Unknown")
+        self.sensor_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sensor_status_label.setStyleSheet("font-size: 12px; color: #666; padding: 5px;")
+        needle_display_layout.addWidget(self.sensor_status_label)
+        
+        sensor_layout.addWidget(needle_display_frame, 2, 0, 1, 2)
+        
+        layout.addWidget(sensor_group)
+        
+        # Needle Target Mode Controls
+        target_group = QGroupBox("Needle Target Mode")
+        target_layout = QGridLayout(target_group)
+        target_layout.setSpacing(10)
+        
+        # Target count input
+        target_label = QLabel("Target Needles:")
+        target_layout.addWidget(target_label, 0, 0)
+        
+        self.needle_target_input = QSpinBox()
+        self.needle_target_input.setMinimum(1)
+        self.needle_target_input.setMaximum(10000)
+        self.needle_target_input.setValue(48)
+        self.needle_target_input.setMinimumHeight(35)
+        self.needle_target_input.setStyleSheet("font-size: 14px;")
+        target_layout.addWidget(self.needle_target_input, 0, 1)
+        
+        # Target direction
+        direction_label = QLabel("Direction:")
+        target_layout.addWidget(direction_label, 0, 2)
+        
+        self.needle_target_direction = QComboBox()
+        self.needle_target_direction.addItems(["CW", "CCW"])
+        self.needle_target_direction.setMinimumHeight(35)
+        self.needle_target_direction.setStyleSheet("font-size: 14px;")
+        target_layout.addWidget(self.needle_target_direction, 0, 3)
+        
+        # Start target mode button
+        self.start_needle_target_btn = QPushButton("Run Until Target Needles")
+        self.start_needle_target_btn.clicked.connect(self.start_needle_target_mode)
+        self.start_needle_target_btn.setMinimumHeight(40)
+        self.start_needle_target_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFE0B2; }")
+        target_layout.addWidget(self.start_needle_target_btn, 1, 0, 1, 4)
+        
+        layout.addWidget(target_group)
+        
+        # Continuous Knitting Controls
+        knitting_group = QGroupBox("Continuous Knitting with Monitoring")
+        knitting_layout = QGridLayout(knitting_group)
+        knitting_layout.setSpacing(10)
+        
+        self.start_knitting_btn = QPushButton("Start Continuous Knitting")
+        self.start_knitting_btn.clicked.connect(self.start_continuous_knitting)
+        self.start_knitting_btn.setMinimumHeight(40)
+        self.start_knitting_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #C8E6C9; }")
+        knitting_layout.addWidget(self.start_knitting_btn, 0, 0)
+        
+        self.stop_knitting_btn = QPushButton("⏹️ Stop Continuous Knitting")
+        self.stop_knitting_btn.clicked.connect(self.stop_continuous_knitting)
+        self.stop_knitting_btn.setMinimumHeight(40)
+        self.stop_knitting_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFCDD2; }")
+        knitting_layout.addWidget(self.stop_knitting_btn, 0, 1)
+        
+        # Info label
+        knitting_info = QLabel("Continuous mode: Distance monitoring stays active while motor runs.\nPerfect for automated knitting with needle detection!")
+        knitting_info.setWordWrap(True)
+        knitting_info.setStyleSheet("color: #666; font-style: italic;")
+        knitting_layout.addWidget(knitting_info, 1, 0, 1, 2)
+        
+        layout.addWidget(knitting_group)
         
         # System Commands
         system_group = QGroupBox("System Commands")
@@ -816,7 +1120,7 @@ class KnittingMachineGUI(QMainWindow):
         system_layout.addWidget(self.home_btn, 0, 1)
         
         self.stop_btn = QPushButton("Emergency Stop")
-        self.stop_btn.clicked.connect(lambda: self.send_command("STOP"))
+        self.stop_btn.clicked.connect(self.stop_machine_immediately)  # Use improved emergency stop
         self.stop_btn.setMinimumHeight(35)
         self.stop_btn.setStyleSheet("QPushButton { background-color: #ffebee; color: #c62828; font-weight: bold; }")
         system_layout.addWidget(self.stop_btn, 1, 0, 1, 2)
@@ -865,6 +1169,25 @@ class KnittingMachineGUI(QMainWindow):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content)
         layout.setSpacing(15)  # Add spacing between sections
+        
+        # Theme Selection
+        theme_group = QGroupBox("Application Theme")
+        theme_layout = QGridLayout(theme_group)
+        theme_layout.setSpacing(10)
+        
+        theme_layout.addWidget(QLabel("Theme:"), 0, 0)
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Pink/Rose", "Dark", "Light/Grey"])
+        self.theme_combo.setCurrentText(self.config.get("theme", "Pink/Rose"))
+        self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
+        theme_layout.addWidget(self.theme_combo, 0, 1)
+        
+        theme_info = QLabel("Choose the color theme for the application interface.")
+        theme_info.setWordWrap(True)
+        theme_info.setStyleSheet("color: #666; font-size: 12px;")
+        theme_layout.addWidget(theme_info, 1, 0, 1, 2)
+        
+        layout.addWidget(theme_group)
         
         # Motor Speed Settings
         speed_group = QGroupBox("Motor Speed Settings")
@@ -1013,6 +1336,433 @@ class KnittingMachineGUI(QMainWindow):
         # Initialize manual chunking info
         if hasattr(self, 'chunking_info'):
             self.check_manual_chunking()
+    
+    # ========== PATTERN BUILDER METHODS ==========
+    
+    def on_pattern_name_changed(self):
+        """Handle pattern name change"""
+        self.current_pattern.name = self.pattern_name_input.text()
+        self.update_pattern_display()
+    
+    def on_pattern_description_changed(self):
+        """Handle pattern description change"""
+        self.current_pattern.description = self.pattern_description.toPlainText()
+    
+    def on_pattern_repetitions_changed(self, value):
+        """Handle pattern repetitions change"""
+        self.current_pattern.repetitions = value
+        self.update_pattern_display()
+    
+    def add_pattern_step(self):
+        """Add a new step to the current pattern"""
+        needles = self.step_needles_input.value()
+        direction = self.step_direction_combo.currentText()
+        rows = self.step_rows_input.value()
+        description = self.step_description_input.text().strip()
+        
+        # Create the step
+        step = PatternStep(needles, direction, rows, description)
+        
+        # Add to current pattern
+        self.current_pattern.add_step(step)
+        
+        # Update display
+        self.update_pattern_display()
+        
+        # Clear input fields
+        self.step_description_input.clear()
+        
+        # Log the addition
+        total_needles = needles * rows
+        self.log_message(f"Added step: {needles} needles × {rows} rows = {total_needles} total needles {direction}")
+    
+    def edit_selected_step(self):
+        """Edit the selected pattern step"""
+        current_row = self.pattern_steps_list.currentRow()
+        if current_row >= 0 and current_row < len(self.current_pattern.steps):
+            step = self.current_pattern.steps[current_row]
+            
+            # Create edit dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Edit Pattern Step")
+            dialog.setModal(True)
+            layout = QVBoxLayout(dialog)
+            
+            # Form fields
+            form_layout = QGridLayout()
+            
+            needles_input = QSpinBox()
+            needles_input.setMinimum(1)
+            needles_input.setMaximum(10000)
+            needles_input.setValue(step.needles)
+            form_layout.addWidget(QLabel("Needles:"), 0, 0)
+            form_layout.addWidget(needles_input, 0, 1)
+            
+            direction_combo = QComboBox()
+            direction_combo.addItems(["CW", "CCW"])
+            direction_combo.setCurrentText(step.direction)
+            form_layout.addWidget(QLabel("Direction:"), 1, 0)
+            form_layout.addWidget(direction_combo, 1, 1)
+            
+            rows_input = QSpinBox()
+            rows_input.setMinimum(1)
+            rows_input.setMaximum(1000)
+            rows_input.setValue(step.rows)
+            rows_input.setToolTip("Number of rows (each row = one full rotation)")
+            form_layout.addWidget(QLabel("Rows:"), 2, 0)
+            form_layout.addWidget(rows_input, 2, 1)
+            
+            desc_input = QLineEdit(step.description)
+            form_layout.addWidget(QLabel("Description:"), 3, 0)
+            form_layout.addWidget(desc_input, 3, 1)
+            
+            layout.addLayout(form_layout)
+            
+            # Buttons
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                step.needles = needles_input.value()
+                step.direction = direction_combo.currentText()
+                step.rows = rows_input.value()
+                step.description = desc_input.text().strip()
+                
+                self.update_pattern_display()
+                self.log_message(f"Edited step {current_row + 1}: {step.needles} needles × {step.rows} rows = {step.get_total_needles()} total needles")
+    
+    def delete_selected_step(self):
+        """Delete the selected pattern step"""
+        current_row = self.pattern_steps_list.currentRow()
+        if current_row >= 0 and current_row < len(self.current_pattern.steps):
+            step = self.current_pattern.steps[current_row]
+            reply = QMessageBox.question(
+                self, "Delete Step", 
+                f"Delete step: {step.description}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                self.current_pattern.remove_step(current_row)
+                self.update_pattern_display()
+                self.log_message(f"Deleted step {current_row + 1}")
+    
+    def move_step_up(self):
+        """Move selected step up"""
+        current_row = self.pattern_steps_list.currentRow()
+        if current_row > 0:
+            # Swap steps
+            steps = self.current_pattern.steps
+            steps[current_row], steps[current_row - 1] = steps[current_row - 1], steps[current_row]
+            
+            self.update_pattern_display()
+            self.pattern_steps_list.setCurrentRow(current_row - 1)
+            self.log_message(f"Moved step {current_row + 1} up")
+    
+    def move_step_down(self):
+        """Move selected step down"""
+        current_row = self.pattern_steps_list.currentRow()
+        if current_row >= 0 and current_row < len(self.current_pattern.steps) - 1:
+            # Swap steps  
+            steps = self.current_pattern.steps
+            steps[current_row], steps[current_row + 1] = steps[current_row + 1], steps[current_row]
+            
+            self.update_pattern_display()
+            self.pattern_steps_list.setCurrentRow(current_row + 1)
+            self.log_message(f"Moved step {current_row + 1} down")
+    
+    def update_pattern_display(self):
+        """Update the pattern steps display"""
+        self.pattern_steps_list.clear()
+        
+        total_needles = 0
+        for i, step in enumerate(self.current_pattern.steps):
+            step_needles = step.get_total_needles()  # needles per row × rows
+            total_needles += step_needles
+            
+            # Create display text
+            rows_text = f" × {step.rows} rows" if step.rows > 1 else ""
+            display_text = f"{i+1}. {step.needles} needles{rows_text} {step.direction} = {step_needles} total"
+            if step.description:
+                display_text += f" - {step.description}"
+            
+            item = QListWidgetItem(display_text)
+            # Color code by direction
+            if step.direction == "CW":
+                item.setBackground(QColor("#E8F5E8"))  # Light green
+            else:
+                item.setBackground(QColor("#FFF0F0"))  # Light red
+            
+            self.pattern_steps_list.addItem(item)
+        
+        # Update summary with more detailed information
+        step_count = len(self.current_pattern.steps)
+        if step_count == 0:
+            self.pattern_summary_label.setText("No steps in pattern yet. Add steps to begin creating your knitting pattern.")
+        else:
+            avg_needles = total_needles / step_count if step_count > 0 else 0
+            total_needles_with_reps = total_needles * self.current_pattern.repetitions
+            rep_text = f" × {self.current_pattern.repetitions} reps = {total_needles_with_reps} needles" if self.current_pattern.repetitions > 1 else ""
+            self.pattern_summary_label.setText(
+                f"Pattern '{self.current_pattern.name}': {step_count} steps | {total_needles} needles per cycle{rep_text} | Avg: {avg_needles:.1f} needles/step"
+            )
+    
+    def save_current_pattern(self):
+        """Save the current pattern to the saved patterns list"""
+        if not self.current_pattern.steps:
+            QMessageBox.warning(self, "Save Pattern", "Cannot save empty pattern!")
+            return
+        
+        # Check if pattern with this name already exists
+        existing_pattern = None
+        for pattern in self.saved_patterns:
+            if pattern.name == self.current_pattern.name:
+                existing_pattern = pattern
+                break
+        
+        if existing_pattern:
+            reply = QMessageBox.question(
+                self, "Pattern Exists", 
+                f"Pattern '{self.current_pattern.name}' already exists. Overwrite?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+            
+            # Replace existing pattern
+            index = self.saved_patterns.index(existing_pattern)
+            self.saved_patterns[index] = KnittingPattern.from_dict(self.current_pattern.to_dict())
+        else:
+            # Add new pattern
+            self.saved_patterns.append(KnittingPattern.from_dict(self.current_pattern.to_dict()))
+        
+        # Save to file
+        self.save_patterns()
+        self.log_message(f"Pattern '{self.current_pattern.name}' saved successfully")
+    
+    def load_pattern_dialog(self):
+        """Show dialog to load a saved pattern"""
+        if not self.saved_patterns:
+            QMessageBox.information(self, "Load Pattern", "No saved patterns available!")
+            return
+        
+        # Create selection dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Load Pattern")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        
+        layout.addWidget(QLabel("Select pattern to load:"))
+        
+        pattern_list = QListWidget()
+        for pattern in self.saved_patterns:
+            total_needles = pattern.get_total_needles()
+            item_text = f"{pattern.name} ({len(pattern.steps)} steps, {total_needles} needles)"
+            pattern_list.addItem(item_text)
+        
+        layout.addWidget(pattern_list)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected_row = pattern_list.currentRow()
+            if selected_row >= 0:
+                self.load_pattern(self.saved_patterns[selected_row])
+    
+    def load_pattern(self, pattern: KnittingPattern):
+        """Load a pattern into the current editor"""
+        self.current_pattern = KnittingPattern.from_dict(pattern.to_dict())
+        
+        # Update UI
+        self.pattern_name_input.setText(self.current_pattern.name)
+        self.pattern_description.setPlainText(self.current_pattern.description)
+        if hasattr(self, 'pattern_repetitions_input'):
+            self.pattern_repetitions_input.setValue(self.current_pattern.repetitions)
+        self.update_pattern_display()
+        
+        self.log_message(f"Loaded pattern '{pattern.name}'")
+    
+    def new_pattern(self):
+        """Create a new empty pattern"""
+        if self.current_pattern.steps:
+            reply = QMessageBox.question(
+                self, "New Pattern",
+                "Current pattern will be lost. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+        
+        self.current_pattern = KnittingPattern("New Pattern")
+        self.pattern_name_input.setText(self.current_pattern.name)
+        self.pattern_description.setPlainText("")
+        if hasattr(self, 'pattern_repetitions_input'):
+            self.pattern_repetitions_input.setValue(self.current_pattern.repetitions)
+        self.update_pattern_display()
+        
+        self.log_message("Created new pattern")
+    
+    def execute_current_pattern(self):
+        """Execute the current pattern"""
+        if not self.current_pattern.steps:
+            QMessageBox.warning(self, "Execute Pattern", "No steps in current pattern!")
+            return
+        
+        # Start execution directly
+        self.start_pattern_execution()
+    
+    def start_pattern_execution(self):
+        """Start executing the pattern"""
+        if self.connect_btn.text() != "Disconnect":
+            QMessageBox.warning(self, "Execution Error", "Please connect to Arduino first!")
+            return
+        
+        if not self.current_pattern.steps:
+            QMessageBox.warning(self, "Execution Error", "No pattern to execute!")
+            return
+        
+        self.pattern_execution_index = 0
+        self.pattern_repetition_index = 0
+        self.pattern_execution_stopped = False  # Reset stop flag
+        
+        # Show progress dialog
+        total_steps = len(self.current_pattern.steps) * self.current_pattern.repetitions
+        self.log_message(f"Starting pattern execution: '{self.current_pattern.name}' with {len(self.current_pattern.steps)} steps × {self.current_pattern.repetitions} repetitions = {total_steps} total steps")
+        
+        self.execute_next_pattern_step()
+    
+    def execute_next_pattern_step(self):
+        """Execute the next step in the pattern"""
+        # Check if execution has been stopped
+        if self.pattern_execution_stopped:
+            self.log_message("Pattern execution stopped by user")
+            return
+            
+        if self.pattern_execution_index >= len(self.current_pattern.steps):
+            # Finished current repetition of pattern, check if more repetitions needed
+            self.pattern_repetition_index += 1
+            if self.pattern_repetition_index >= self.current_pattern.repetitions:
+                # All repetitions complete
+                self.log_message(f"Pattern execution completed! Executed {self.current_pattern.repetitions} repetitions of {len(self.current_pattern.steps)} steps each.")
+                return
+            else:
+                # Start next repetition
+                self.pattern_execution_index = 0
+                self.log_message(f"Starting repetition {self.pattern_repetition_index + 1}/{self.current_pattern.repetitions}")
+        
+        step = self.current_pattern.steps[self.pattern_execution_index]
+        
+        # Log step execution with repetition info
+        step_num = self.pattern_execution_index + 1
+        rep_num = self.pattern_repetition_index + 1
+        total_steps = len(self.current_pattern.steps)
+        total_reps = self.current_pattern.repetitions
+        
+        total_needles_for_step = step.get_total_needles()  # needles per row × rows
+        
+        self.log_message(f"Executing step {step_num}/{total_steps} (repetition {rep_num}/{total_reps}): {step.needles} needles × {step.rows} rows = {total_needles_for_step} total needles {step.direction}")
+        
+        # Check stop flag again right before sending command
+        if self.pattern_execution_stopped:
+            self.log_message("Pattern execution stopped before sending motor command")
+            return
+        
+        # Send needle target command for the total needles (needles × rows)
+        command = f"NEEDLE_TARGET:{total_needles_for_step}:{step.direction}"
+        success = self.serial_worker.send_motor_command_with_monitoring(command)
+        
+        if not success:
+            self.log_message("Failed to send command")
+            return
+        
+        # Move to next step
+        self.pattern_execution_index += 1
+        
+        # Continue with next step after a shorter delay (more responsive to stop commands)
+        QTimer.singleShot(100, self.execute_next_pattern_step)
+    
+    def pause_pattern_execution(self):
+        """Pause pattern execution"""
+        self.serial_worker.send_command("STOP")
+        self.log_message("Pattern execution paused")
+    
+    def stop_pattern_execution(self):
+        """Stop pattern execution"""
+        self.pattern_execution_stopped = True  # Set stop flag
+        self.serial_worker.send_command("STOP")
+        self.pattern_execution_index = 0
+        self.pattern_repetition_index = 0
+        self.log_message("Pattern execution stopped")
+    
+    def stop_machine_immediately(self):
+        """Emergency stop - immediately halt the machine"""
+        # Set stop flag immediately to prevent further execution
+        self.pattern_execution_stopped = True
+        
+        # Update UI to show stopping state
+        if hasattr(self, 'stop_machine_btn'):
+            self.stop_machine_btn.setText("STOPPING...")
+            self.stop_machine_btn.setEnabled(False)
+        
+        if hasattr(self, 'execute_pattern_btn'):
+            self.execute_pattern_btn.setEnabled(False)
+        
+        if hasattr(self, 'serial_worker') and self.serial_worker:
+            try:
+                # Send stop commands directly through serial port for immediate effect
+                if hasattr(self.serial_worker, 'serial_port') and self.serial_worker.serial_port:
+                    serial_port = self.serial_worker.serial_port
+                    if serial_port.is_open:
+                        # Send multiple immediate stop commands
+                        for _ in range(3):  # Send 3 times to ensure it gets through
+                            serial_port.write(b"STOP\n")
+                            serial_port.write(b"EMERGENCY_STOP\n")
+                            serial_port.write(b"HALT\n")
+                        serial_port.flush()  # Force immediate send
+                
+                # Also use the worker methods as backup
+                self.serial_worker.send_command("STOP")
+                self.serial_worker.send_command("EMERGENCY_STOP") 
+                self.serial_worker.send_command("HALT")
+                
+            except Exception as e:
+                self.log_message(f"Error during emergency stop: {e}")
+            
+            # Reset all execution indices
+            self.pattern_execution_index = 0
+            self.pattern_repetition_index = 0
+            
+            self.log_message("EMERGENCY STOP - Machine halted immediately!")
+            
+            # Re-enable UI after a short delay
+            QTimer.singleShot(2000, self._reset_stop_button_ui)
+            
+            # Show message box to confirm the stop
+            QMessageBox.information(self, "Machine Stopped", 
+                                  "Machine has been stopped immediately!\n\n"
+                                  "All pattern execution has been halted.",
+                                  QMessageBox.StandardButton.Ok)
+        else:
+            self._reset_stop_button_ui()  # Reset UI immediately if not connected
+            QMessageBox.warning(self, "Not Connected", 
+                              "No connection to machine. Please connect first.",
+                              QMessageBox.StandardButton.Ok)
+    
+    def _reset_stop_button_ui(self):
+        """Reset the stop button UI after emergency stop"""
+        if hasattr(self, 'stop_machine_btn'):
+            self.stop_machine_btn.setText("STOP MACHINE")
+            self.stop_machine_btn.setEnabled(True)
+        
+        if hasattr(self, 'execute_pattern_btn'):
+            self.execute_pattern_btn.setEnabled(True)
+        
+    # ========== END PATTERN BUILDER METHODS ==========
         
     def create_console_panel(self, parent):
         """Create the console and status panel"""
@@ -1052,143 +1802,660 @@ class KnittingMachineGUI(QMainWindow):
         
         parent.addWidget(console_widget)
         
-    def apply_modern_styling(self):
-        """Apply modern styling to the application"""
+    def on_theme_changed(self, theme):
+        """Handle theme change"""
+        self.config["theme"] = theme
+        self.save_config()
+        self.apply_theme(theme)
+        self.log_message(f"Theme changed to: {theme}")
+
+    def apply_theme(self, theme_name):
+        """Apply the selected theme"""
+        if theme_name == "Pink/Rose":
+            self.apply_pink_theme()
+        elif theme_name == "Dark":
+            self.apply_dark_theme()
+        elif theme_name == "Light/Grey":
+            self.apply_light_theme()
+
+    def apply_pink_theme(self):
+        """Apply pink/rose theme (current default)"""
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #f5f5f5;
-                color: #F48FB1;
+                background-color: white;
+                color: #333333;
             }
             
             QWidget {
-                color: #F48FB1;
+                background-color: white;
+                color: #333333;
             }
             
             QLabel {
-                color: #F48FB1;
+                color: #333333;
                 font-weight: normal;
+                font-size: 14px;
             }
             
             QGroupBox {
-                color: #F48FB1;
+                color: #333333;
                 font-weight: bold;
-                border: 2px solid #cccccc;
+                border: 2px solid #e0e0e0;
                 border-radius: 8px;
                 margin-top: 1ex;
-                padding-top: 10px;
+                padding-top: 15px;
+                background-color: #fafafa;
+                font-size: 14px;
             }
             
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
-                padding: 0 5px 0 5px;
-                color: #EC407A;
+                padding: 0 8px 0 8px;
+                color: #e91e63;
                 font-weight: bold;
+                font-size: 15px;
             }
             
             QPushButton {
-                background-color: #F48FB1;
+                background-color: #e91e63;
                 color: white;
                 border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-                min-height: 20px;
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-weight: 500;
+                font-size: 14px;
+                min-height: 25px;
+                min-width: 100px;
             }
             
             QPushButton:hover {
-                background-color: #EC407A;
+                background-color: #c2185b;
             }
             
             QPushButton:pressed {
-                background-color: #E91E63;
+                background-color: #ad1457;
             }
             
             QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
+                background-color: #e0e0e0;
+                color: #9e9e9e;
             }
             
             QLineEdit, QSpinBox, QComboBox {
-                padding: 8px;
-                border: 2px solid #ddd;
-                border-radius: 4px;
+                padding: 10px;
+                border: 2px solid #e0e0e0;
+                border-radius: 6px;
                 font-size: 14px;
-                color: #F48FB1;
+                color: #333333;
                 background-color: white;
+                min-height: 20px;
             }
             
             QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-                border-color: #F48FB1;
+                border-color: #e91e63;
                 background-color: white;
             }
             
             QTextEdit {
-                border: 2px solid #ddd;
-                border-radius: 4px;
-                font-family: 'Consolas', monospace;
-                color: #F48FB1;
+                border: 2px solid #e0e0e0;
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 13px;
+                color: #333333;
                 background-color: white;
+                font-family: 'Consolas', 'Monaco', monospace;
+            }
+            
+            QTextEdit:focus {
+                border-color: #e91e63;
             }
             
             QTabWidget::pane {
-                border: 1px solid #cccccc;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                background-color: white;
+            }
+            
+            QTabWidget::tab-bar {
+                alignment: center;
+            }
+            
+            QTabBar::tab {
+                background-color: #f5f5f5;
+                color: #666666;
+                padding: 12px 20px;
+                margin-right: 4px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-size: 14px;
+                font-weight: 500;
+                min-width: 120px;
+            }
+            
+            QTabBar::tab:selected {
+                background-color: #e91e63;
+                color: white;
+            }
+            
+            QTabBar::tab:hover:!selected {
+                background-color: #fce4ec;
+                color: #e91e63;
+            }
+            
+            QListWidget {
+                border: 2px solid #e0e0e0;
+                border-radius: 6px;
+                background-color: white;
+                color: #333333;
+                font-size: 14px;
+                padding: 4px;
+            }
+            
+            QListWidget::item {
+                padding: 8px;
+                margin: 2px;
                 border-radius: 4px;
+            }
+            
+            QListWidget::item:selected {
+                background-color: #e91e63;
+                color: white;
+            }
+            
+            QListWidget::item:hover:!selected {
+                background-color: #fce4ec;
+                color: #333333;
+            }
+            
+            QProgressBar {
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                background-color: white;
+                color: #333333;
+                text-align: center;
+                font-weight: bold;
+                font-size: 14px;
+                min-height: 25px;
+            }
+            
+            QProgressBar::chunk {
+                background-color: #e91e63;
+                border-radius: 6px;
+            }
+            
+            QScrollArea {
+                border: none;
+                background-color: white;
+            }
+            
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #f5f5f5;
+                border: 1px solid #e0e0e0;
+                width: 20px;
+            }
+            
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #e91e63;
+            }
+            
+            QComboBox::drop-down {
+                border: none;
+                background-color: #f5f5f5;
+                width: 30px;
+            }
+            
+            QComboBox::down-arrow {
+                width: 12px;
+                height: 12px;
+            }
+            
+            QComboBox QAbstractItemView {
+                border: 2px solid #e0e0e0;
+                background-color: white;
+                color: #333333;
+                selection-background-color: #e91e63;
+            }
+        """)
+
+    def apply_dark_theme(self):
+        """Apply dark theme"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            
+            QWidget {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            
+            QLabel {
+                color: #ffffff;
+                font-weight: normal;
+                font-size: 14px;
+            }
+            
+            QGroupBox {
+                color: #ffffff;
+                font-weight: bold;
+                border: 2px solid #555555;
+                border-radius: 8px;
+                margin-top: 1ex;
+                padding-top: 15px;
+                background-color: #3a3a3a;
+                font-size: 14px;
+            }
+            
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 8px 0 8px;
+                color: #64b5f6;
+                font-weight: bold;
+                font-size: 15px;
+            }
+            
+            QPushButton {
+                background-color: #64b5f6;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-weight: 500;
+                font-size: 14px;
+                min-height: 25px;
+                min-width: 100px;
+            }
+            
+            QPushButton:hover {
+                background-color: #42a5f5;
+            }
+            
+            QPushButton:pressed {
+                background-color: #1e88e5;
+            }
+            
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #888888;
+            }
+            
+            QLineEdit, QSpinBox, QComboBox {
+                padding: 10px;
+                border: 2px solid #555555;
+                border-radius: 6px;
+                font-size: 14px;
+                color: #ffffff;
+                background-color: #3a3a3a;
+                min-height: 20px;
+            }
+            
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+                border-color: #64b5f6;
+                background-color: #3a3a3a;
+            }
+            
+            QTextEdit {
+                border: 2px solid #555555;
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 13px;
+                color: #ffffff;
+                background-color: #3a3a3a;
+                font-family: 'Consolas', 'Monaco', monospace;
+            }
+            
+            QTextEdit:focus {
+                border-color: #64b5f6;
+            }
+            
+            QTabWidget::pane {
+                border: 2px solid #555555;
+                border-radius: 8px;
+                background-color: #2b2b2b;
+            }
+            
+            QTabBar::tab {
+                background-color: #3a3a3a;
+                color: #ffffff;
+                padding: 12px 20px;
+                margin-right: 4px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-size: 14px;
+                font-weight: 500;
+                min-width: 120px;
+            }
+            
+            QTabBar::tab:selected {
+                background-color: #64b5f6;
+                color: white;
+            }
+            
+            QTabBar::tab:hover:!selected {
+                background-color: #4a4a4a;
+                color: #64b5f6;
+            }
+            
+            QListWidget {
+                border: 2px solid #555555;
+                border-radius: 6px;
+                background-color: #3a3a3a;
+                color: #ffffff;
+                font-size: 14px;
+                padding: 4px;
+            }
+            
+            QListWidget::item {
+                padding: 8px;
+                margin: 2px;
+                border-radius: 4px;
+            }
+            
+            QListWidget::item:selected {
+                background-color: #64b5f6;
+                color: white;
+            }
+            
+            QListWidget::item:hover:!selected {
+                background-color: #4a4a4a;
+                color: #ffffff;
+            }
+            
+            QProgressBar {
+                border: 2px solid #555555;
+                border-radius: 8px;
+                background-color: #3a3a3a;
+                color: #ffffff;
+                text-align: center;
+                font-weight: bold;
+                font-size: 14px;
+                min-height: 25px;
+            }
+            
+            QProgressBar::chunk {
+                background-color: #64b5f6;
+                border-radius: 6px;
+            }
+            
+            QScrollArea {
+                border: none;
+                background-color: #2b2b2b;
+            }
+            
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #4a4a4a;
+                border: 1px solid #555555;
+                width: 20px;
+            }
+            
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #64b5f6;
+            }
+            
+            QComboBox::drop-down {
+                border: none;
+                background-color: #4a4a4a;
+                width: 30px;
+            }
+            
+            QComboBox QAbstractItemView {
+                border: 2px solid #555555;
+                background-color: #3a3a3a;
+                color: #ffffff;
+                selection-background-color: #64b5f6;
+            }
+        """)
+
+    def apply_light_theme(self):
+        """Apply light/grey theme"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f5f5f5;
+                color: #2e2e2e;
+            }
+            
+            QWidget {
+                background-color: #f5f5f5;
+                color: #2e2e2e;
+            }
+            
+            QLabel {
+                color: #2e2e2e;
+                font-weight: normal;
+                font-size: 14px;
+            }
+            
+            QGroupBox {
+                color: #2e2e2e;
+                font-weight: bold;
+                border: 2px solid #cccccc;
+                border-radius: 8px;
+                margin-top: 1ex;
+                padding-top: 15px;
+                background-color: #ffffff;
+                font-size: 14px;
+            }
+            
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 8px 0 8px;
+                color: #607d8b;
+                font-weight: bold;
+                font-size: 15px;
+            }
+            
+            QPushButton {
+                background-color: #607d8b;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-weight: 500;
+                font-size: 14px;
+                min-height: 25px;
+                min-width: 100px;
+            }
+            
+            QPushButton:hover {
+                background-color: #546e7a;
+            }
+            
+            QPushButton:pressed {
+                background-color: #455a64;
+            }
+            
+            QPushButton:disabled {
+                background-color: #e0e0e0;
+                color: #9e9e9e;
+            }
+            
+            QLineEdit, QSpinBox, QComboBox {
+                padding: 10px;
+                border: 2px solid #cccccc;
+                border-radius: 6px;
+                font-size: 14px;
+                color: #2e2e2e;
+                background-color: white;
+                min-height: 20px;
+            }
+            
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+                border-color: #607d8b;
+                background-color: white;
+            }
+            
+            QTextEdit {
+                border: 2px solid #cccccc;
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 13px;
+                color: #2e2e2e;
+                background-color: white;
+                font-family: 'Consolas', 'Monaco', monospace;
+            }
+            
+            QTextEdit:focus {
+                border-color: #607d8b;
+            }
+            
+            QTabWidget::pane {
+                border: 2px solid #cccccc;
+                border-radius: 8px;
+                background-color: white;
             }
             
             QTabBar::tab {
                 background-color: #e0e0e0;
-                color: #F48FB1;
-                padding: 8px 16px;
-                margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
+                color: #2e2e2e;
+                padding: 12px 20px;
+                margin-right: 4px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-size: 14px;
+                font-weight: 500;
+                min-width: 120px;
             }
             
             QTabBar::tab:selected {
-                background-color: #F48FB1;
+                background-color: #607d8b;
                 color: white;
             }
             
-            QProgressBar {
-                border: 2px solid #ddd;
-                border-radius: 4px;
-                text-align: center;
-                color: #F48FB1;
+            QTabBar::tab:hover:!selected {
+                background-color: #f0f0f0;
+                color: #607d8b;
+            }
+            
+            QListWidget {
+                border: 2px solid #cccccc;
+                border-radius: 6px;
                 background-color: white;
+                color: #2e2e2e;
+                font-size: 14px;
+                padding: 4px;
+            }
+            
+            QListWidget::item {
+                padding: 8px;
+                margin: 2px;
+                border-radius: 4px;
+            }
+            
+            QListWidget::item:selected {
+                background-color: #607d8b;
+                color: white;
+            }
+            
+            QListWidget::item:hover:!selected {
+                background-color: #f0f0f0;
+                color: #2e2e2e;
+            }
+            
+            QProgressBar {
+                border: 2px solid #cccccc;
+                border-radius: 8px;
+                background-color: white;
+                color: #2e2e2e;
+                text-align: center;
+                font-weight: bold;
+                font-size: 14px;
+                min-height: 25px;
             }
             
             QProgressBar::chunk {
-                background-color: #F48FB1;
-                border-radius: 2px;
+                background-color: #607d8b;
+                border-radius: 6px;
             }
             
-            QComboBox QAbstractItemView {
-                color: #F48FB1;
-                background-color: white;
-                selection-background-color: #FCE4EC;
+            QScrollArea {
+                border: none;
+                background-color: #f5f5f5;
             }
             
             QSpinBox::up-button, QSpinBox::down-button {
-                background-color: #F48FB1;
+                background-color: #e0e0e0;
+                border: 1px solid #cccccc;
+                width: 20px;
             }
             
-            QScrollBar:vertical {
-                background-color: #f0f0f0;
-                width: 12px;
-                border-radius: 6px;
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #607d8b;
             }
             
-            QScrollBar::handle:vertical {
-                background-color: #F48FB1;
-                border-radius: 6px;
-                min-height: 20px;
+            QComboBox::drop-down {
+                border: none;
+                background-color: #e0e0e0;
+                width: 30px;
             }
             
-            QScrollBar::handle:vertical:hover {
-                background-color: #EC407A;
+            QComboBox QAbstractItemView {
+                border: 2px solid #cccccc;
+                background-color: white;
+                color: #2e2e2e;
+                selection-background-color: #607d8b;
             }
         """)
+
+    def apply_modern_styling(self):
+        """Apply the selected theme"""
+        theme = self.config.get("theme", "Pink/Rose")
+        self.apply_theme(theme)
+        
+        # Always apply matte green styling to execute button regardless of theme
+        if hasattr(self, 'execute_pattern_btn'):
+            self.execute_pattern_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4caf50;
+                    color: white;
+                    border: none;
+                    padding: 12px 24px;
+                    border-radius: 6px;
+                    font-weight: 600;
+                    font-size: 14px;
+                    min-height: 25px;
+                    min-width: 120px;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+                QPushButton:pressed {
+                    background-color: #3d8b40;
+                }
+                QPushButton:disabled {
+                    background-color: #a5d6a7;
+                    color: #ffffff;
+                }
+            """)
+        
+        # Always apply red styling to stop button regardless of theme
+        if hasattr(self, 'stop_machine_btn'):
+            self.stop_machine_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #f44336;
+                    color: white;
+                    border: none;
+                    padding: 12px 24px;
+                    border-radius: 6px;
+                    font-weight: 600;
+                    font-size: 14px;
+                    min-height: 25px;
+                    min-width: 120px;
+                }
+                QPushButton:hover {
+                    background-color: #d32f2f;
+                }
+                QPushButton:pressed {
+                    background-color: #b71c1c;
+                }
+                QPushButton:disabled {
+                    background-color: #ffcdd2;
+                    color: #ffffff;
+                }
+            """)
         
     # Event handlers
     def refresh_ports(self):
@@ -1400,6 +2667,87 @@ Steps per Needle: {self.config['steps_per_needle']}"""
         self.serial_worker.queue_commands(self.loaded_script)
         self.serial_worker.start()
         
+    def manual_turn_with_monitoring(self):
+        """Execute manual turn while keeping needle monitoring active"""
+        if self.connect_btn.text() != "Disconnect":
+            QMessageBox.warning(self, "Control Error", "Please connect to Arduino first")
+            return
+            
+        steps = self.manual_steps.value()
+        direction = self.manual_direction.currentText()
+        command = f"TURN:{steps}:{direction}"
+        
+        # Enable concurrent monitoring mode
+        self.concurrent_monitoring = True
+        
+        # Increase needle monitoring frequency during motor operations
+        if self.needle_monitoring_enabled:
+            self.needle_timer.stop()
+            self.needle_timer.start(300)  # Check every 300ms during motor operations
+        else:
+            # Start needle monitoring automatically for concurrent mode
+            self.needle_monitoring_enabled = True
+            self.needle_timer.start(300)  # Check every 300ms
+            self.monitor_needle_btn.setText("Stop Needle Monitoring")
+        
+        # Send command without blocking needle monitoring
+        success = self.serial_worker.send_motor_command_with_monitoring(command)
+        if success:
+            self.log_message(f"🔄 Motor turning {steps} steps {direction} (with needle monitoring)")
+        else:
+            self.concurrent_monitoring = False
+            
+    def start_needle_target_mode(self):
+        """Start needle target mode - run motor until target needles are counted"""
+        if self.connect_btn.text() != "Disconnect":
+            QMessageBox.warning(self, "Control Error", "Please connect to Arduino first")
+            return
+            
+        target_needles = self.needle_target_input.value()
+        direction = self.needle_target_direction.currentText()
+        
+        # Show confirmation dialog
+        reply = QMessageBox.question(
+            self, 
+            "Needle Target Mode", 
+            f"Motor will run {direction} until {target_needles} needles are counted.\n\n"
+            f"Current needle count will be the starting point.\n"
+            f"You can stop anytime with the STOP button.\n\n"
+            f"Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # Enable needle monitoring automatically
+        if not self.needle_monitoring_enabled:
+            self.needle_monitoring_enabled = True
+            self.needle_timer.start(300)  # Fast monitoring during target mode
+            self.monitor_needle_btn.setText("Stop Needle Monitoring")
+        else:
+            # Increase frequency for target mode
+            self.needle_timer.stop()
+            self.needle_timer.start(300)
+        
+        # Enable concurrent monitoring
+        self.concurrent_monitoring = True
+        
+        # Send needle target command
+        command = f"NEEDLE_TARGET:{target_needles}:{direction}"
+        success = self.serial_worker.send_motor_command_with_monitoring(command)
+        
+        if success:
+            self.log_message(f"🎯 Needle target mode started: {target_needles} needles {direction}")
+            # Disable the button to prevent multiple starts
+            self.start_needle_target_btn.setEnabled(False)
+            self.start_needle_target_btn.setText("🎯 Target Mode Running...")
+            self.start_needle_target_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFB74D; }")
+        else:
+            self.concurrent_monitoring = False
+            self.log_message("❌ Failed to start needle target mode")
+            
     def manual_turn(self):
         """Execute manual turn"""
         if self.connect_btn.text() != "Disconnect":
@@ -1416,6 +2764,25 @@ Steps per Needle: {self.config['steps_per_needle']}"""
             self.send_chunked_command(command)
         else:
             self.send_command(command)
+            
+    def start_continuous_knitting(self):
+        """Start continuous knitting with distance monitoring"""
+        if self.connect_btn.text() != "Disconnect":
+            QMessageBox.warning(self, "Control Error", "Please connect to Arduino first")
+            return
+            
+        # Enable both concurrent monitoring and needle monitoring
+        if not self.needle_monitoring_enabled:
+            self.toggle_needle_monitoring()
+            
+        self.concurrent_monitoring = True
+        self.log_message("🧶 Continuous knitting mode started (needle monitoring active)")
+        
+    def stop_continuous_knitting(self):
+        """Stop continuous knitting mode"""
+        self.concurrent_monitoring = False
+        self.serial_worker.send_command("STOP")
+        self.log_message("⏹️ Continuous knitting mode stopped")
             
     def send_chunked_command(self, command: str):
         """Send a command that may need to be chunked"""
@@ -1472,12 +2839,52 @@ Steps per Needle: {self.config['steps_per_needle']}"""
         if self.progress_dialog:
             self.progress_dialog.accept()
             
+        # Reset needle target button if it was running
+        if hasattr(self, 'start_needle_target_btn') and not self.start_needle_target_btn.isEnabled():
+            self.start_needle_target_btn.setEnabled(True)
+            self.start_needle_target_btn.setText("🎯 Run Until Target Needles")
+            self.start_needle_target_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFE0B2; }")
+            
     def emergency_stop(self):
-        """Emergency stop - immediately stop motor"""
-        self.send_command("STOP")
-        self.serial_worker.stop_operation()
+        """Emergency stop - immediately stop motor using improved stop mechanism"""
+        # Use the same immediate stop functionality as the pattern builder
+        self.pattern_execution_stopped = True  # Set stop flag immediately
+        
+        try:
+            # Send stop commands directly through serial port for immediate effect
+            if hasattr(self, 'serial_worker') and self.serial_worker and hasattr(self.serial_worker, 'serial_port'):
+                serial_port = self.serial_worker.serial_port
+                if serial_port and serial_port.is_open:
+                    # Send multiple immediate stop commands
+                    for _ in range(3):  # Send 3 times to ensure it gets through
+                        serial_port.write(b"STOP\n")
+                        serial_port.write(b"EMERGENCY_STOP\n")
+                        serial_port.write(b"HALT\n")
+                    serial_port.flush()  # Force immediate send
+            
+            # Also use the existing methods as backup
+            self.send_command("STOP")
+            if hasattr(self.serial_worker, 'stop_operation'):
+                self.serial_worker.stop_operation()
+                
+        except Exception as e:
+            self.log_message(f"Error during emergency stop: {e}")
+        
+        # Reset all execution indices
+        self.pattern_execution_index = 0
+        self.pattern_repetition_index = 0
+        
+        # Reset needle target button if it was running
+        if hasattr(self, 'start_needle_target_btn') and not self.start_needle_target_btn.isEnabled():
+            self.start_needle_target_btn.setEnabled(True)
+            self.start_needle_target_btn.setText("🎯 Run Until Target Needles")
+            self.start_needle_target_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFE0B2; }")
+        
+        # Close progress dialog if open
         if self.progress_dialog:
             self.progress_dialog.accept()
+        
+        self.log_message("EMERGENCY STOP - Machine halted immediately from manual control!")
             
     # Signal handlers
     @pyqtSlot(str)
@@ -1486,40 +2893,115 @@ Steps per Needle: {self.config['steps_per_needle']}"""
         # Clean up the response
         response = response.strip()
         
-        # Special handling for distance readings
-        if response.startswith("Distance:"):
-            # Reset the pending flag
-            self.distance_request_pending = False
-            
-            # Extract distance value and highlight it
-            distance_parts = response.split(":", 1)  # Split only on first colon
-            if len(distance_parts) >= 2:
-                distance_value = distance_parts[1].strip()
-                if "ERROR" in distance_value:
-                    self.log_message(f"❌ HC-SR04 Error: {distance_value}")
-                elif self.distance_monitoring_enabled:
-                    self.log_message(f"📏 HC-SR04 Distance: {distance_value}")
-                else:
-                    self.log_message(f"📏 Arduino Distance Reading: {distance_value}")
-            else:
-                self.log_message(f"Arduino: {response}")
-        # Special handling for needle count
-        elif response.startswith("Needle count:"):
-            needle_parts = response.split(":", 1)  # Split only on first colon
+        # Special handling for needle detection notifications
+        if response.startswith("NEEDLE_DETECTED:"):
+            # Extract needle count from notification
+            needle_parts = response.split(":", 1)
             if len(needle_parts) >= 2:
                 count_value = needle_parts[1].strip()
-                self.log_message(f"🧷 Needle Count: {count_value}")
+                self.log_message(f"🧷 Needle detected! Total count: {count_value}")
+                # Update real-time display immediately
+                self.current_needle_display.setText(count_value)
+                self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #FF6B9D; padding: 15px; background-color: #FFF3F8;")
+                # Flash effect
+                QTimer.singleShot(500, lambda: self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #FF6B9D; padding: 15px;"))
+                
+                # Update needle count window if it exists
+                if hasattr(self, 'needle_window') and self.needle_window:
+                    self.needle_window.update_needle_count()
+                    self.needle_window.flash_effect()
+            return
+        
+        # Special handling for needle count readings
+        elif response.startswith("Needle count:"):
+            # Reset the pending flag
+            self.needle_request_pending = False
+            
+            # Extract needle count value
+            needle_parts = response.split(":", 1)
+            if len(needle_parts) >= 2:
+                count_value = needle_parts[1].strip()
+                if self.needle_monitoring_enabled or self.concurrent_monitoring:
+                    # Enhanced logging for concurrent mode
+                    if self.concurrent_monitoring:
+                        self.log_message(f"🧷 Needle count (while turning): {count_value}")
+                    else:
+                        self.log_message(f"🧷 LM393 Needle Count: {count_value}")
+                    
+                    # Update real-time display
+                    self.current_needle_display.setText(count_value)
+                    self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #4CAF50; padding: 15px;")
+                else:
+                    self.log_message(f"🧷 Arduino Needle Count: {count_value}")
+                    self.current_needle_display.setText(count_value)
+                    self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #FF6B9D; padding: 15px;")
+                
+                # Update needle count window if it exists
+                if hasattr(self, 'needle_window') and self.needle_window:
+                    self.needle_window.update_needle_count()
             else:
                 self.log_message(f"Arduino: {response}")
-        # Handle debug messages
-        elif response.startswith("DEBUG:"):
-            if self.distance_monitoring_enabled:
-                # Only show debug during active monitoring
-                self.log_message(f"🔧 {response}")
+        
+        # Special handling for sensor status in STATUS response
+        elif "Sensor:" in response:
+            status_parts = response.split(":", 1)
+            if len(status_parts) >= 2:
+                status_value = status_parts[1].strip()
+                if status_value == "CLEAR":
+                    self.sensor_status_label.setText("Status: ✅ Clear")
+                    self.sensor_status_label.setStyleSheet("font-size: 12px; color: #4CAF50; padding: 5px;")
+                elif status_value == "BLOCKED":
+                    self.sensor_status_label.setText("Status: 🚫 Blocked")
+                    self.sensor_status_label.setStyleSheet("font-size: 12px; color: #F44336; padding: 5px;")
+                else:
+                    self.sensor_status_label.setText(f"Status: {status_value}")
+                    self.sensor_status_label.setStyleSheet("font-size: 12px; color: #666; padding: 5px;")
+            return
+        
+        # Special handling for motor completion
+        elif response == "DONE":
+            if self.concurrent_monitoring:
+                self.log_message("✅ Motor operation completed (needle monitoring continues)")
+                self.concurrent_monitoring = False
+                # Reset needle monitoring to normal frequency
+                if self.needle_monitoring_enabled:
+                    self.needle_timer.stop()
+                    self.needle_timer.start(1000)  # Back to 1 second intervals
+                
+                # Reset needle target button if it was running
+                if hasattr(self, 'start_needle_target_btn') and not self.start_needle_target_btn.isEnabled():
+                    self.start_needle_target_btn.setEnabled(True)
+                    self.start_needle_target_btn.setText("🎯 Run Until Target Needles")
+                    self.start_needle_target_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFE0B2; }")
+            else:
+                self.log_message("✅ Operation completed")
+        
         # Handle other important responses with icons
-        elif "reset" in response.lower() and "needle" in response.lower():
+        elif "reset" in response.lower() and ("needle" in response.lower() or "count" in response.lower()):
             self.log_message(f"🔄 {response}")
-        elif response == "OK" and self.distance_monitoring_enabled:
+            # Reset display when count is reset
+            self.current_needle_display.setText("0")
+            self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #FF6B9D; padding: 15px;")
+            # Update needle count window if it exists
+            if hasattr(self, 'needle_window') and self.needle_window:
+                self.needle_window.update_needle_count()
+        
+        # Special handling for needle target mode messages
+        elif "Needle target mode:" in response:
+            self.log_message(f"🎯 {response}")
+        elif "Target reached!" in response:
+            self.log_message(f"🏆 {response}")
+        elif "Needle progress:" in response:
+            self.log_message(f"📊 {response}")
+        elif "Safety timeout" in response or "STOP command received" in response:
+            self.log_message(f"⚠️ {response}")
+            # Reset button state if target mode was stopped
+            if hasattr(self, 'start_needle_target_btn') and not self.start_needle_target_btn.isEnabled():
+                self.start_needle_target_btn.setEnabled(True)
+                self.start_needle_target_btn.setText("🎯 Run Until Target Needles")
+                self.start_needle_target_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFE0B2; }")
+        
+        elif response == "OK" and self.needle_monitoring_enabled:
             # Don't log simple OK responses during monitoring to reduce clutter
             pass
         else:
@@ -1555,59 +3037,67 @@ Steps per Needle: {self.config['steps_per_needle']}"""
         cursor.movePosition(cursor.MoveOperation.End)
         self.console_output.setTextCursor(cursor)
         
-    def toggle_distance_monitoring(self):
-        """Toggle real-time distance monitoring"""
+    def toggle_needle_monitoring(self):
+        """Toggle real-time needle monitoring"""
         if self.connect_btn.text() != "Disconnect":
             QMessageBox.warning(self, "Monitoring Error", "Please connect to Arduino first")
             return
             
-        if self.distance_monitoring_enabled:
+        if self.needle_monitoring_enabled:
             # Stop monitoring
-            self.distance_timer.stop()
-            self.distance_monitoring_enabled = False
-            self.distance_request_pending = False  # Reset the flag
-            self.monitor_distance_btn.setText("Start Distance Monitoring")
-            self.log_message("Distance monitoring stopped")
+            self.needle_timer.stop()
+            self.needle_monitoring_enabled = False
+            self.needle_request_pending = False  # Reset the flag
+            self.monitor_needle_btn.setText("Start Needle Monitoring")
+            self.log_message("Needle monitoring stopped")
         else:
             # Start monitoring
-            self.distance_monitoring_enabled = True
-            self.distance_timer.start(500)  # Update every 500ms (2 times per second) - safer interval
-            self.monitor_distance_btn.setText("Stop Distance Monitoring")
-            self.log_message("Distance monitoring started (updates 2x per second)")
+            self.needle_monitoring_enabled = True
+            self.needle_timer.start(1000)  # Update every 1000ms (1 time per second) - very safe interval
+            self.monitor_needle_btn.setText("Stop Needle Monitoring")
+            self.log_message("Needle monitoring started (updates 1x per second)")
             
     def check_for_responses(self):
         """Check for Arduino responses without blocking"""
         if self.connect_btn.text() == "Disconnect":
-            response = self.serial_worker.check_distance_response()
+            response = self.serial_worker.check_needle_response()
             if response:
-                self.on_arduino_response(response)
+                # Log all responses for concurrent monitoring
+                if self.concurrent_monitoring or self.needle_monitoring_enabled:
+                    self.on_arduino_response(response)
+                elif not self.needle_monitoring_enabled:
+                    # Only log non-needle responses when not monitoring
+                    if not response.startswith("Needle count:"):
+                        self.on_arduino_response(response)
     
-    def update_distance_reading(self):
-        """Update distance reading from HC-SR04 sensor"""
+    def update_needle_reading(self):
+        """Update needle count reading from LM393 sensor"""
         if (self.connect_btn.text() == "Disconnect" and 
-            self.distance_monitoring_enabled and 
-            not self.distance_request_pending):
+            self.needle_monitoring_enabled and 
+            not self.needle_request_pending):
             
             # Set flag to prevent overlapping requests
-            self.distance_request_pending = True
+            self.needle_request_pending = True
             
-            # Send distance command with minimal blocking
-            success = self.serial_worker.send_distance_command_lightweight()
+            # Send needle count command with minimal blocking
+            success = self.serial_worker.send_needle_command_lightweight()
             if not success:
-                self.distance_request_pending = False  # Reset on failure
+                self.needle_request_pending = False  # Reset on failure
+            
+            # If in concurrent mode, also check for any responses immediately
+            if self.concurrent_monitoring:
+                response = self.serial_worker.check_needle_response()
+                if response:
+                    self.on_arduino_response(response)
             
     def test_sensor(self):
-        """Test HC-SR04 sensor with multiple readings"""
+        """Test LM393 sensor status"""
         if self.connect_btn.text() != "Disconnect":
             QMessageBox.warning(self, "Test Error", "Please connect to Arduino first")
             return
             
-        self.log_message("🧪 Starting HC-SR04 sensor test (5 readings)...")
-        for i in range(5):
-            self.log_message(f"Test reading {i+1}/5:")
-            self.serial_worker.send_command("DISTANCE")
-            # Small delay between readings
-            QTimer.singleShot(500 * (i+1), lambda: None)  # Staggered timing
+        self.log_message("🧪 Checking LM393 sensor status...")
+        self.serial_worker.send_command("STATUS")
         
     def refresh_ui_elements(self):
         """Refresh UI elements for smoother operation"""
@@ -1632,10 +3122,10 @@ Steps per Needle: {self.config['steps_per_needle']}"""
     def closeEvent(self, event):
         """Handle application close"""
         # Stop all timers and monitoring
-        if self.distance_monitoring_enabled:
-            self.distance_timer.stop()
-            self.distance_monitoring_enabled = False
-            self.distance_request_pending = False
+        if self.needle_monitoring_enabled:
+            self.needle_timer.stop()
+            self.needle_monitoring_enabled = False
+            self.needle_request_pending = False
             
         if hasattr(self, 'ui_refresh_timer'):
             self.ui_refresh_timer.stop()
@@ -1648,6 +3138,107 @@ Steps per Needle: {self.config['steps_per_needle']}"""
             self.serial_worker.wait(3000)  # Wait up to 3 seconds
             
         self.serial_worker.disconnect_arduino()
+        event.accept()
+
+    def show_needle_count_window(self):
+        """Show a separate window for needle count display"""
+        if hasattr(self, 'needle_window') and self.needle_window:
+            # If window already exists, just show it
+            self.needle_window.show()
+            self.needle_window.raise_()
+            return
+            
+        # Create new needle count window
+        self.needle_window = NeedleCountWindow(self)
+        self.needle_window.show()
+
+
+class NeedleCountWindow(QWidget):
+    """Standalone window to display needle count in large format"""
+    
+    def __init__(self, parent_controller):
+        super().__init__()
+        self.parent_controller = parent_controller
+        self.init_ui()
+        
+    def init_ui(self):
+        """Initialize the needle count window UI"""
+        self.setWindowTitle("Needle Counter")
+        self.setFixedSize(300, 200)
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
+        
+        # Apply pink theme
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #FFF0F5;
+                font-family: Arial, sans-serif;
+            }
+            QLabel {
+                color: #333;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title_label = QLabel("Needles Passed")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #FF6B9D;")
+        layout.addWidget(title_label)
+        
+        # Large needle count display
+        self.needle_count_label = QLabel("0")
+        self.needle_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.needle_count_label.setStyleSheet("""
+            font-size: 64px; 
+            font-weight: bold; 
+            color: #FF6B9D; 
+            background-color: white;
+            border: 3px solid #FF6B9D;
+            border-radius: 10px;
+            padding: 20px;
+        """)
+        layout.addWidget(self.needle_count_label)
+        
+        # Status label
+        self.status_label = QLabel("Ready")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet("font-size: 14px; color: #666;")
+        layout.addWidget(self.status_label)
+        
+        # Connect to parent's needle count updates
+        if hasattr(self.parent_controller, 'current_needle_display'):
+            # Update this window when main window updates
+            self.update_needle_count()
+    
+    def update_needle_count(self):
+        """Update the needle count display"""
+        if hasattr(self.parent_controller, 'current_needle_display'):
+            current_text = self.parent_controller.current_needle_display.text()
+            self.needle_count_label.setText(current_text)
+            
+            # Update status based on monitoring state
+            if hasattr(self.parent_controller, 'needle_monitoring_enabled'):
+                if self.parent_controller.needle_monitoring_enabled:
+                    self.status_label.setText("Monitoring Active")
+                    self.status_label.setStyleSheet("font-size: 14px; color: #4CAF50;")
+                else:
+                    self.status_label.setText("Monitoring Stopped")
+                    self.status_label.setStyleSheet("font-size: 14px; color: #F44336;")
+    
+    def flash_effect(self):
+        """Flash the display when a new needle is detected"""
+        original_style = self.needle_count_label.styleSheet()
+        flash_style = original_style.replace("background-color: white;", "background-color: #FFE4E1;")
+        
+        self.needle_count_label.setStyleSheet(flash_style)
+        QTimer.singleShot(300, lambda: self.needle_count_label.setStyleSheet(original_style))
+    
+    def closeEvent(self, event):
+        """Handle window close event"""
+        self.parent_controller.needle_window = None
         event.accept()
 
 
