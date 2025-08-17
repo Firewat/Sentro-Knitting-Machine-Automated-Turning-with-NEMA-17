@@ -81,12 +81,26 @@ from PyQt6.QtWidgets import (
     QGridLayout, QLabel, QPushButton, QLineEdit, QTextEdit, QComboBox, 
     QSpinBox, QProgressBar, QFileDialog, QMessageBox, QTabWidget,
     QScrollArea, QFrame, QSplitter, QGroupBox, QDialog, QDialogButtonBox,
-    QListWidget, QListWidgetItem
+    QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSize, pyqtSlot
 )
 from PyQt6.QtGui import QFont, QPalette, QColor, QIcon
+
+
+class NoWheelSpinBox(QSpinBox):
+    """Custom QSpinBox that ignores mouse wheel events"""
+    def wheelEvent(self, event):
+        # Ignore wheel events to prevent accidental value changes
+        event.ignore()
+
+
+class NoWheelComboBox(QComboBox):
+    """Custom QComboBox that ignores mouse wheel events"""
+    def wheelEvent(self, event):
+        # Ignore wheel events to prevent accidental value changes
+        event.ignore()
 
 
 class SerialWorker(QThread):
@@ -569,6 +583,10 @@ class KnittingMachineGUI(QMainWindow):
         self.needle_request_pending = False  # Prevent overlapping requests
         self.concurrent_monitoring = False  # Flag for concurrent operations
         
+        # Needle position tracking
+        self.current_needle_position = 0  # Track current needle position
+        self.total_needles_on_machine = 48  # Default, can be configured
+        
         # Response checker timer for non-blocking serial reading
         self.response_checker = QTimer()
         self.response_checker.timeout.connect(self.check_for_responses)
@@ -671,7 +689,7 @@ class KnittingMachineGUI(QMainWindow):
         conn_layout = QGridLayout(conn_group)
         
         conn_layout.addWidget(QLabel("Port:"), 0, 0)
-        self.port_combo = QComboBox()
+        self.port_combo = NoWheelComboBox()
         self.refresh_ports()
         conn_layout.addWidget(self.port_combo, 0, 1)
         
@@ -683,26 +701,7 @@ class KnittingMachineGUI(QMainWindow):
         self.connect_btn.clicked.connect(self.toggle_connection)
         conn_layout.addWidget(self.connect_btn, 1, 0, 1, 3)
         
-        # Connection status indicator
-        self.status_label = QLabel("Disconnected")
-        self.status_label.setStyleSheet("color: #F44336; font-weight: bold; padding: 5px;")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        conn_layout.addWidget(self.status_label, 2, 0, 1, 3)
-        
         layout.addWidget(conn_group)
-        
-        # Settings section
-        settings_group = QGroupBox("Settings")
-        settings_layout = QGridLayout(settings_group)
-        
-        settings_layout.addWidget(QLabel("Steps per Needle:"), 0, 0)
-        self.steps_spinbox = QSpinBox()
-        self.steps_spinbox.setRange(1, 10000)
-        self.steps_spinbox.setValue(self.config["steps_per_needle"])
-        self.steps_spinbox.valueChanged.connect(self.on_steps_changed)
-        settings_layout.addWidget(self.steps_spinbox, 0, 1)
-        
-        layout.addWidget(settings_group)
         
         # Tab widget for different functions - Reordered for needle-focused workflow
         self.tab_widget = QTabWidget()
@@ -753,7 +752,7 @@ class KnittingMachineGUI(QMainWindow):
         info_layout.addWidget(self.pattern_description, 1, 1)
         
         info_layout.addWidget(QLabel("Pattern Repetitions:"), 2, 0)
-        self.pattern_repetitions_input = QSpinBox()
+        self.pattern_repetitions_input = NoWheelSpinBox()
         self.pattern_repetitions_input.setMinimum(1)
         self.pattern_repetitions_input.setMaximum(1000)
         self.pattern_repetitions_input.setValue(self.current_pattern.repetitions)
@@ -768,7 +767,7 @@ class KnittingMachineGUI(QMainWindow):
         step_layout = QGridLayout(step_group)
         
         step_layout.addWidget(QLabel("Needles:"), 0, 0)
-        self.step_needles_input = QSpinBox()
+        self.step_needles_input = NoWheelSpinBox()
         self.step_needles_input.setMinimum(1)
         self.step_needles_input.setMaximum(10000) 
         self.step_needles_input.setValue(48)
@@ -776,13 +775,13 @@ class KnittingMachineGUI(QMainWindow):
         step_layout.addWidget(self.step_needles_input, 0, 1)
         
         step_layout.addWidget(QLabel("Direction:"), 0, 2)
-        self.step_direction_combo = QComboBox()
+        self.step_direction_combo = NoWheelComboBox()
         self.step_direction_combo.addItems(["CW", "CCW"])
         self.step_direction_combo.setStyleSheet("font-size: 16px;")
         step_layout.addWidget(self.step_direction_combo, 0, 3)
         
         step_layout.addWidget(QLabel("Rows:"), 1, 0)
-        self.step_rows_input = QSpinBox()
+        self.step_rows_input = NoWheelSpinBox()
         self.step_rows_input.setMinimum(1)
         self.step_rows_input.setMaximum(1000)
         self.step_rows_input.setValue(1)
@@ -836,14 +835,49 @@ class KnittingMachineGUI(QMainWindow):
         
         layout.addWidget(steps_group)
         
-        # Pattern Summary
-        summary_group = QGroupBox("Pattern Summary")
+        # Pattern Summary - Visual Representation
+        summary_group = QGroupBox("Pattern Visual Preview")
         summary_layout = QVBoxLayout(summary_group)
         
-        self.pattern_summary_label = QLabel()
-        self.pattern_summary_label.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px;")
-        self.pattern_summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        summary_layout.addWidget(self.pattern_summary_label)
+        # Create a table widget for the pattern visualization (Excel-like grid)
+        self.pattern_table = QTableWidget()
+        self.pattern_table.setMinimumHeight(120)
+        self.pattern_table.setMaximumHeight(300)
+        self.pattern_table.setAlternatingRowColors(True)
+        self.pattern_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.pattern_table.verticalHeader().setVisible(True)
+        self.pattern_table.horizontalHeader().setVisible(True)
+        self.pattern_table.setShowGrid(True)
+        
+        # Make the table look more like Excel
+        self.pattern_table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #d0d0d0;
+                background-color: white;
+                alternate-background-color: #f5f5f5;
+                selection-background-color: transparent;
+            }
+            QTableWidget::item {
+                padding: 4px;
+                text-align: center;
+                border: 1px solid #d0d0d0;
+            }
+            QHeaderView::section {
+                background-color: #e0e0e0;
+                font-weight: bold;
+                padding: 4px;
+                border: 1px solid #b0b0b0;
+            }
+        """)
+        
+        summary_layout.addWidget(self.pattern_table)
+        
+        # Add pattern info label below the visual
+        self.pattern_info_label = QLabel()
+        self.pattern_info_label.setStyleSheet("font-size: 12px; color: #666; padding: 5px;")
+        self.pattern_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pattern_info_label.setWordWrap(True)
+        summary_layout.addWidget(self.pattern_info_label)
         
         layout.addWidget(summary_group)
         
@@ -948,13 +982,106 @@ class KnittingMachineGUI(QMainWindow):
         layout = QVBoxLayout(scroll_content)
         layout.setSpacing(20)  # Add spacing between sections
         
-        # Manual turn controls
-        manual_group = QGroupBox("Manual Turn Control")
+        # Current Position & Home Control
+        position_group = QGroupBox("Current Position & Home")
+        position_layout = QGridLayout(position_group)
+        position_layout.setSpacing(15)
+        
+        # Current needle position display
+        self.current_needle_display = QLabel("0")
+        self.current_needle_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.current_needle_display.setStyleSheet("font-size: 48px; font-weight: bold; color: #FF6B9D; padding: 20px; background-color: #F9F9F9; border: 2px solid #DDD; border-radius: 8px;")
+        position_layout.addWidget(QLabel("Current Needle Position:"), 0, 0)
+        position_layout.addWidget(self.current_needle_display, 0, 1)
+        
+        # Home button with proper logic
+        self.home_btn = QPushButton("🏠 Return to Home (Needle 0)")
+        self.home_btn.clicked.connect(self.return_to_home)
+        self.home_btn.setMinimumHeight(45)
+        self.home_btn.setStyleSheet("QPushButton { font-weight: bold; font-size: 14px; background-color: #4CAF50; color: white; border-radius: 6px; } QPushButton:hover { background-color: #45a049; }")
+        position_layout.addWidget(self.home_btn, 1, 0, 1, 2)
+        
+        layout.addWidget(position_group)
+        
+        # Needle Control Mode (Main control)
+        needle_group = QGroupBox("Needle-Based Control")
+        needle_layout = QGridLayout(needle_group)
+        needle_layout.setSpacing(15)
+        
+        # Target needle input
+        needle_layout.addWidget(QLabel("Target Needles:"), 0, 0)
+        self.needle_target_input = NoWheelSpinBox()
+        self.needle_target_input.setMinimum(1)
+        self.needle_target_input.setMaximum(10000)
+        self.needle_target_input.setValue(48)
+        self.needle_target_input.setMinimumHeight(35)
+        self.needle_target_input.setStyleSheet("font-size: 16px; padding: 5px;")
+        needle_layout.addWidget(self.needle_target_input, 0, 1)
+        
+        # Direction selection
+        needle_layout.addWidget(QLabel("Direction:"), 0, 2)
+        self.needle_target_direction = NoWheelComboBox()
+        self.needle_target_direction.addItems(["CW", "CCW"])
+        self.needle_target_direction.setMinimumHeight(35)
+        self.needle_target_direction.setStyleSheet("font-size: 16px; padding: 5px;")
+        needle_layout.addWidget(self.needle_target_direction, 0, 3)
+        
+        # Execute needle control button
+        self.start_needle_target_btn = QPushButton("▶️ Turn to Target Needles")
+        self.start_needle_target_btn.clicked.connect(self.start_needle_target_mode)
+        self.start_needle_target_btn.setMinimumHeight(45)
+        self.start_needle_target_btn.setStyleSheet("QPushButton { font-weight: bold; font-size: 16px; background-color: #2196F3; color: white; border-radius: 6px; } QPushButton:hover { background-color: #1976D2; }")
+        needle_layout.addWidget(self.start_needle_target_btn, 1, 0, 1, 4)
+        
+        layout.addWidget(needle_group)
+        
+        # Needle Sensor Controls
+        sensor_group = QGroupBox("Needle Sensor Controls")
+        sensor_layout = QGridLayout(sensor_group)
+        sensor_layout.setSpacing(10)
+        
+        self.monitor_needle_btn = QPushButton("Start/Stop Needle Monitoring")
+        self.monitor_needle_btn.clicked.connect(self.toggle_needle_monitoring)
+        self.monitor_needle_btn.setMinimumHeight(35)
+        sensor_layout.addWidget(self.monitor_needle_btn, 0, 0)
+        
+        self.reset_count_btn = QPushButton("Reset Needle Count")
+        self.reset_count_btn.clicked.connect(self.reset_needle_position)
+        self.reset_count_btn.setMinimumHeight(35)
+        sensor_layout.addWidget(self.reset_count_btn, 0, 1)
+        
+        self.show_needle_window_btn = QPushButton("Show Needle Window")
+        self.show_needle_window_btn.clicked.connect(self.show_needle_count_window)
+        self.show_needle_window_btn.setMinimumHeight(35)
+        sensor_layout.addWidget(self.show_needle_window_btn, 1, 0, 1, 2)
+        
+        # Sensor status indicator
+        self.sensor_status_label = QLabel("Monitoring: Stopped")
+        self.sensor_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sensor_status_label.setStyleSheet("font-size: 14px; color: #666; padding: 8px; background-color: #F0F0F0; border-radius: 4px;")
+        sensor_layout.addWidget(self.sensor_status_label, 2, 0, 1, 2)
+        
+        layout.addWidget(sensor_group)
+        
+        # Emergency Stop
+        emergency_group = QGroupBox("Emergency Control")
+        emergency_layout = QVBoxLayout(emergency_group)
+        
+        self.stop_btn = QPushButton("🛑 EMERGENCY STOP")
+        self.stop_btn.clicked.connect(self.stop_machine_immediately)
+        self.stop_btn.setMinimumHeight(50)
+        self.stop_btn.setStyleSheet("QPushButton { background-color: #f44336; color: white; font-weight: bold; font-size: 16px; border-radius: 6px; } QPushButton:hover { background-color: #d32f2f; }")
+        emergency_layout.addWidget(self.stop_btn)
+        
+        layout.addWidget(emergency_group)
+        
+        # Manual Step Control (moved to bottom, less prominent)
+        manual_group = QGroupBox("Manual Step Control (Advanced)")
         manual_layout = QGridLayout(manual_group)
         manual_layout.setSpacing(10)
         
         manual_layout.addWidget(QLabel("Steps:"), 0, 0)
-        self.manual_steps = QSpinBox()
+        self.manual_steps = NoWheelSpinBox()
         self.manual_steps.setRange(1, 50000)
         self.manual_steps.setValue(1000)
         self.manual_steps.setMinimumWidth(120)
@@ -963,7 +1090,7 @@ class KnittingMachineGUI(QMainWindow):
         manual_layout.addWidget(self.manual_steps, 0, 1)
         
         manual_layout.addWidget(QLabel("Direction:"), 1, 0)
-        self.manual_direction = QComboBox()
+        self.manual_direction = NoWheelComboBox()
         self.manual_direction.addItems(["CW", "CCW"])
         self.manual_direction.setMinimumWidth(120)
         self.manual_direction.setMinimumHeight(30)
@@ -976,163 +1103,30 @@ class KnittingMachineGUI(QMainWindow):
         self.chunking_info.setMinimumHeight(40)
         manual_layout.addWidget(self.chunking_info, 2, 0, 1, 2)
         
-        self.manual_turn_btn = QPushButton("Execute Turn")
-        self.manual_turn_btn.clicked.connect(self.manual_turn)
-        self.manual_turn_btn.setMinimumHeight(40)
-        self.manual_turn_btn.setStyleSheet("QPushButton { font-weight: bold; }")
+        self.manual_turn_btn = QPushButton("Execute Manual Steps")
+        self.manual_turn_btn.clicked.connect(self.manual_turn_with_tracking)
+        self.manual_turn_btn.setMinimumHeight(35)
+        self.manual_turn_btn.setStyleSheet("QPushButton { font-size: 12px; }")
         manual_layout.addWidget(self.manual_turn_btn, 3, 0, 1, 2)
-        
-        # Concurrent turn button (turn + monitor needles)
-        self.concurrent_turn_btn = QPushButton("Turn + Monitor Needles")
-        self.concurrent_turn_btn.clicked.connect(self.manual_turn_with_monitoring)
-        self.concurrent_turn_btn.setMinimumHeight(40)
-        self.concurrent_turn_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #E1BEE7; }")
-        manual_layout.addWidget(self.concurrent_turn_btn, 4, 0, 1, 2)
         
         layout.addWidget(manual_group)
         
-        # LM393 Infrared Needle Counter Controls
-        sensor_group = QGroupBox("LM393 Infrared Needle Counter")
-        sensor_layout = QGridLayout(sensor_group)
-        sensor_layout.setSpacing(10)
-        
-        self.needle_count_btn = QPushButton("Get Needle Count")
-        self.needle_count_btn.clicked.connect(lambda: self.send_command("NEEDLE_COUNT"))
-        self.needle_count_btn.setMinimumHeight(35)
-        sensor_layout.addWidget(self.needle_count_btn, 0, 0)
-        
-        self.monitor_needle_btn = QPushButton("Start Needle Monitoring")
-        self.monitor_needle_btn.clicked.connect(self.toggle_needle_monitoring)
-        self.monitor_needle_btn.setMinimumHeight(35)
-        sensor_layout.addWidget(self.monitor_needle_btn, 0, 1)
-        
-        self.reset_count_btn = QPushButton("Reset Needle Count")
-        self.reset_count_btn.clicked.connect(lambda: self.send_command("RESET_COUNT"))
-        self.reset_count_btn.setMinimumHeight(35)
-        sensor_layout.addWidget(self.reset_count_btn, 1, 0)
-        
-        # Show needle window button
-        self.show_needle_window_btn = QPushButton("Show Needle Window")
-        self.show_needle_window_btn.clicked.connect(self.show_needle_count_window)
-        self.show_needle_window_btn.setMinimumHeight(35)
-        sensor_layout.addWidget(self.show_needle_window_btn, 1, 1)
-        
-        # Real-time needle count display
-        needle_display_frame = QFrame()
-        needle_display_frame.setFrameStyle(QFrame.Shape.Box)
-        needle_display_frame.setStyleSheet("QFrame { background-color: #F5F5F5; border: 2px solid #DDD; border-radius: 5px; }")
-        needle_display_layout = QVBoxLayout(needle_display_frame)
-        
-        needle_label = QLabel("Needles Counted:")
-        needle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        needle_label.setStyleSheet("font-weight: bold; color: #333;")
-        needle_display_layout.addWidget(needle_label)
-        
-        self.current_needle_display = QLabel("0")
-        self.current_needle_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #FF6B9D; padding: 15px;")
-        needle_display_layout.addWidget(self.current_needle_display)
-        
-        # Add sensor status indicator
-        self.sensor_status_label = QLabel("Status: Unknown")
-        self.sensor_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.sensor_status_label.setStyleSheet("font-size: 12px; color: #666; padding: 5px;")
-        needle_display_layout.addWidget(self.sensor_status_label)
-        
-        sensor_layout.addWidget(needle_display_frame, 2, 0, 1, 2)
-        
-        layout.addWidget(sensor_group)
-        
-        # Needle Target Mode Controls
-        target_group = QGroupBox("Needle Target Mode")
-        target_layout = QGridLayout(target_group)
-        target_layout.setSpacing(10)
-        
-        # Target count input
-        target_label = QLabel("Target Needles:")
-        target_layout.addWidget(target_label, 0, 0)
-        
-        self.needle_target_input = QSpinBox()
-        self.needle_target_input.setMinimum(1)
-        self.needle_target_input.setMaximum(10000)
-        self.needle_target_input.setValue(48)
-        self.needle_target_input.setMinimumHeight(35)
-        self.needle_target_input.setStyleSheet("font-size: 14px;")
-        target_layout.addWidget(self.needle_target_input, 0, 1)
-        
-        # Target direction
-        direction_label = QLabel("Direction:")
-        target_layout.addWidget(direction_label, 0, 2)
-        
-        self.needle_target_direction = QComboBox()
-        self.needle_target_direction.addItems(["CW", "CCW"])
-        self.needle_target_direction.setMinimumHeight(35)
-        self.needle_target_direction.setStyleSheet("font-size: 14px;")
-        target_layout.addWidget(self.needle_target_direction, 0, 3)
-        
-        # Start target mode button
-        self.start_needle_target_btn = QPushButton("Run Until Target Needles")
-        self.start_needle_target_btn.clicked.connect(self.start_needle_target_mode)
-        self.start_needle_target_btn.setMinimumHeight(40)
-        self.start_needle_target_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFE0B2; }")
-        target_layout.addWidget(self.start_needle_target_btn, 1, 0, 1, 4)
-        
-        layout.addWidget(target_group)
-        
-        # Continuous Knitting Controls
-        knitting_group = QGroupBox("Continuous Knitting with Monitoring")
-        knitting_layout = QGridLayout(knitting_group)
-        knitting_layout.setSpacing(10)
-        
-        self.start_knitting_btn = QPushButton("Start Continuous Knitting")
-        self.start_knitting_btn.clicked.connect(self.start_continuous_knitting)
-        self.start_knitting_btn.setMinimumHeight(40)
-        self.start_knitting_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #C8E6C9; }")
-        knitting_layout.addWidget(self.start_knitting_btn, 0, 0)
-        
-        self.stop_knitting_btn = QPushButton("⏹️ Stop Continuous Knitting")
-        self.stop_knitting_btn.clicked.connect(self.stop_continuous_knitting)
-        self.stop_knitting_btn.setMinimumHeight(40)
-        self.stop_knitting_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #FFCDD2; }")
-        knitting_layout.addWidget(self.stop_knitting_btn, 0, 1)
-        
-        # Info label
-        knitting_info = QLabel("Continuous mode: Distance monitoring stays active while motor runs.\nPerfect for automated knitting with needle detection!")
-        knitting_info.setWordWrap(True)
-        knitting_info.setStyleSheet("color: #666; font-style: italic;")
-        knitting_layout.addWidget(knitting_info, 1, 0, 1, 2)
-        
-        layout.addWidget(knitting_group)
-        
-        # System Commands
-        system_group = QGroupBox("System Commands")
-        system_layout = QGridLayout(system_group)
-        system_layout.setSpacing(10)
-        
-        self.status_btn = QPushButton("Get Status")
-        self.status_btn.clicked.connect(lambda: self.send_command("STATUS"))
-        self.status_btn.setMinimumHeight(35)
-        system_layout.addWidget(self.status_btn, 0, 0)
-        
-        self.home_btn = QPushButton("Home Position")
-        self.home_btn.clicked.connect(lambda: self.send_command("HOME"))
-        self.home_btn.setMinimumHeight(35)
-        system_layout.addWidget(self.home_btn, 0, 1)
-        
-        self.stop_btn = QPushButton("Emergency Stop")
-        self.stop_btn.clicked.connect(self.stop_machine_immediately)  # Use improved emergency stop
-        self.stop_btn.setMinimumHeight(35)
-        self.stop_btn.setStyleSheet("QPushButton { background-color: #ffebee; color: #c62828; font-weight: bold; }")
-        system_layout.addWidget(self.stop_btn, 1, 0, 1, 2)
-        
-        layout.addWidget(system_group)
-        
-        # Custom command
+        # Custom command (keep at bottom)
         custom_group = QGroupBox("Custom Command")
         custom_layout = QHBoxLayout(custom_group)
         custom_layout.setSpacing(10)
         
         self.custom_command = QLineEdit()
+        self.custom_command.setPlaceholderText("Enter custom Arduino command...")
+        self.custom_command.returnPressed.connect(self.send_custom_command)
+        custom_layout.addWidget(self.custom_command)
+        
+        self.send_custom_btn = QPushButton("Send")
+        self.send_custom_btn.clicked.connect(self.send_custom_command)
+        self.send_custom_btn.setMinimumHeight(35)
+        custom_layout.addWidget(self.send_custom_btn)
+        
+        layout.addWidget(custom_group)
         self.custom_command.setPlaceholderText("Enter custom command (e.g., TURN:500:CW)...")
         self.custom_command.setMinimumHeight(35)
         custom_layout.addWidget(self.custom_command)
@@ -1176,7 +1170,7 @@ class KnittingMachineGUI(QMainWindow):
         theme_layout.setSpacing(10)
         
         theme_layout.addWidget(QLabel("Theme:"), 0, 0)
-        self.theme_combo = QComboBox()
+        self.theme_combo = NoWheelComboBox()
         self.theme_combo.addItems(["Pink/Rose", "Dark", "Light/Grey"])
         self.theme_combo.setCurrentText(self.config.get("theme", "Pink/Rose"))
         self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
@@ -1195,7 +1189,7 @@ class KnittingMachineGUI(QMainWindow):
         speed_layout.setSpacing(10)
         
         speed_layout.addWidget(QLabel("Step Delay (microseconds):"), 0, 0)
-        self.speed_spinbox = QSpinBox()
+        self.speed_spinbox = NoWheelSpinBox()
         self.speed_spinbox.setRange(500, 3000)
         self.speed_spinbox.setValue(1000)  # Default motor speed
         self.speed_spinbox.setSuffix(" μs")
@@ -1247,7 +1241,7 @@ class KnittingMachineGUI(QMainWindow):
         micro_layout.setSpacing(10)
         
         micro_layout.addWidget(QLabel("Microstepping:"), 0, 0)
-        self.micro_combo = QComboBox()
+        self.micro_combo = NoWheelComboBox()
         self.micro_combo.addItems(["1", "2", "4", "8", "16", "32"])
         self.micro_combo.setCurrentText("1")  # Default microstepping
         self.micro_combo.setMinimumWidth(120)
@@ -1272,18 +1266,32 @@ class KnittingMachineGUI(QMainWindow):
         advanced_layout = QGridLayout(advanced_group)
         advanced_layout.setSpacing(10)
         
-        advanced_layout.addWidget(QLabel("Chunk Size (max steps):"), 0, 0)
-        self.chunk_size_spinbox = QSpinBox()
+        # Steps per Needle setting
+        advanced_layout.addWidget(QLabel("Steps per Needle:"), 0, 0)
+        self.steps_spinbox = NoWheelSpinBox()
+        self.steps_spinbox.setRange(1, 10000)
+        self.steps_spinbox.setValue(self.config["steps_per_needle"])
+        self.steps_spinbox.setMinimumWidth(120)
+        self.steps_spinbox.valueChanged.connect(self.on_steps_changed)
+        advanced_layout.addWidget(self.steps_spinbox, 0, 1)
+        
+        steps_info = QLabel("Number of stepper motor steps per needle position\nTypical values: 800-1200 for most setups")
+        steps_info.setWordWrap(True)
+        steps_info.setStyleSheet("QLabel { color: #888888; font-size: 12px; margin: 5px; }")
+        advanced_layout.addWidget(steps_info, 1, 0, 1, 2)
+        
+        advanced_layout.addWidget(QLabel("Chunk Size (max steps):"), 2, 0)
+        self.chunk_size_spinbox = NoWheelSpinBox()
         self.chunk_size_spinbox.setRange(5000, 32700)
         self.chunk_size_spinbox.setValue(32000)
         self.chunk_size_spinbox.setMinimumWidth(120)
         self.chunk_size_spinbox.valueChanged.connect(self.on_chunk_size_changed)
-        advanced_layout.addWidget(self.chunk_size_spinbox, 0, 1)
+        advanced_layout.addWidget(self.chunk_size_spinbox, 2, 1)
         
         chunk_info = QLabel("Maximum steps sent in one command to Arduino\nHigher values = fewer commands but near Arduino limit (32767)")
         chunk_info.setWordWrap(True)
         chunk_info.setStyleSheet("QLabel { color: #888888; font-size: 12px; margin: 5px; }")
-        advanced_layout.addWidget(chunk_info, 1, 0, 1, 2)
+        advanced_layout.addWidget(chunk_info, 3, 0, 1, 2)
         
         layout.addWidget(advanced_group)
         
@@ -1391,20 +1399,20 @@ class KnittingMachineGUI(QMainWindow):
             # Form fields
             form_layout = QGridLayout()
             
-            needles_input = QSpinBox()
+            needles_input = NoWheelSpinBox()
             needles_input.setMinimum(1)
             needles_input.setMaximum(10000)
             needles_input.setValue(step.needles)
             form_layout.addWidget(QLabel("Needles:"), 0, 0)
             form_layout.addWidget(needles_input, 0, 1)
             
-            direction_combo = QComboBox()
+            direction_combo = NoWheelComboBox()
             direction_combo.addItems(["CW", "CCW"])
             direction_combo.setCurrentText(step.direction)
             form_layout.addWidget(QLabel("Direction:"), 1, 0)
             form_layout.addWidget(direction_combo, 1, 1)
             
-            rows_input = QSpinBox()
+            rows_input = NoWheelSpinBox()
             rows_input.setMinimum(1)
             rows_input.setMaximum(1000)
             rows_input.setValue(step.rows)
@@ -1497,17 +1505,113 @@ class KnittingMachineGUI(QMainWindow):
             
             self.pattern_steps_list.addItem(item)
         
-        # Update summary with more detailed information
+        # Update visual pattern representation
+        self.update_pattern_visual()
+    
+    def update_pattern_visual(self):
+        """Create an Excel-like table visualization of the knitting pattern"""
+        # Clear the table
+        self.pattern_table.clear()
+        
         step_count = len(self.current_pattern.steps)
         if step_count == 0:
-            self.pattern_summary_label.setText("No steps in pattern yet. Add steps to begin creating your knitting pattern.")
-        else:
-            avg_needles = total_needles / step_count if step_count > 0 else 0
-            total_needles_with_reps = total_needles * self.current_pattern.repetitions
-            rep_text = f" × {self.current_pattern.repetitions} reps = {total_needles_with_reps} needles" if self.current_pattern.repetitions > 1 else ""
-            self.pattern_summary_label.setText(
-                f"Pattern '{self.current_pattern.name}': {step_count} steps | {total_needles} needles per cycle{rep_text} | Avg: {avg_needles:.1f} needles/step"
-            )
+            # Show empty state
+            self.pattern_table.setRowCount(1)
+            self.pattern_table.setColumnCount(1)
+            self.pattern_table.setHorizontalHeaderLabels(["Pattern"])
+            self.pattern_table.setVerticalHeaderLabels(["Info"])
+            
+            item = QTableWidgetItem("Add steps to see pattern preview")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.pattern_table.setItem(0, 0, item)
+            self.pattern_table.resizeColumnsToContents()
+            self.pattern_info_label.setText("No pattern created yet")
+            return
+        
+        # Calculate grid dimensions
+        max_needles = 0
+        total_rows = 0
+        
+        # First pass: determine grid size
+        for step in self.current_pattern.steps:
+            max_needles = max(max_needles, step.needles)
+            total_rows += step.rows
+        
+        # Account for repetitions
+        total_rows_with_reps = total_rows * self.current_pattern.repetitions
+        
+        # Set up the table
+        self.pattern_table.setRowCount(total_rows_with_reps)
+        self.pattern_table.setColumnCount(max_needles)
+        
+        # Create column headers (needle numbers)
+        column_headers = [f"N{i+1}" for i in range(max_needles)]
+        self.pattern_table.setHorizontalHeaderLabels(column_headers)
+        
+        # Fill the table with pattern data
+        current_row = 0
+        
+        for rep in range(self.current_pattern.repetitions):
+            for step_idx, step in enumerate(self.current_pattern.steps):
+                # Determine colors for this step
+                if step.direction == "CW":
+                    bg_color = QColor("#E3F2FD")  # Light blue
+                    symbol = "↻"
+                else:
+                    bg_color = QColor("#FFEBEE")  # Light red
+                    symbol = "↺"
+                
+                # Fill rows for this step
+                for row in range(step.rows):
+                    # Set row header
+                    row_label = f"R{current_row + 1}"
+                    if self.current_pattern.repetitions > 1:
+                        row_label += f" (Rep {rep + 1}, Step {step_idx + 1})"
+                    else:
+                        row_label += f" (Step {step_idx + 1})"
+                    
+                    self.pattern_table.setVerticalHeaderItem(current_row, QTableWidgetItem(row_label))
+                    
+                    # Fill needle columns for this row
+                    for needle in range(max_needles):
+                        item = QTableWidgetItem()
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                        
+                        if needle < step.needles:
+                            # This needle is used in this step
+                            item.setText(f"{step.direction}\n{symbol}")
+                            item.setBackground(bg_color)
+                            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        else:
+                            # This needle is not used
+                            item.setText("-")
+                            item.setBackground(QColor("#F5F5F5"))
+                            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        
+                        self.pattern_table.setItem(current_row, needle, item)
+                    
+                    current_row += 1
+        
+        # Resize table appropriately
+        self.pattern_table.resizeColumnsToContents()
+        self.pattern_table.resizeRowsToContents()
+        
+        # Set uniform column widths for better Excel-like appearance
+        header = self.pattern_table.horizontalHeader()
+        header.setDefaultSectionSize(60)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        
+        # Update info label
+        total_needles = self.current_pattern.get_total_needles()
+        total_needles_with_reps = total_needles * self.current_pattern.repetitions
+        rep_text = f" (×{self.current_pattern.repetitions} = {total_needles_with_reps} total)" if self.current_pattern.repetitions > 1 else ""
+        avg_needles = total_needles / step_count if step_count > 0 else 0
+        
+        self.pattern_info_label.setText(
+            f"Grid: {total_rows_with_reps} rows × {max_needles} needles | "
+            f"Pattern: {step_count} steps, {total_needles} needles per cycle{rep_text} | "
+            f"Blue=CW ↻, Red=CCW ↺ | Average: {avg_needles:.1f} needles/step"
+        )
     
     def save_current_pattern(self):
         """Save the current pattern to the saved patterns list"""
@@ -2765,6 +2869,102 @@ Steps per Needle: {self.config['steps_per_needle']}"""
         else:
             self.send_command(command)
             
+    def manual_turn_with_tracking(self):
+        """Execute manual turn with needle position tracking"""
+        if self.connect_btn.text() != "Disconnect":
+            QMessageBox.warning(self, "Control Error", "Please connect to Arduino first")
+            return
+            
+        steps = self.manual_steps.value()
+        direction = self.manual_direction.currentText()
+        
+        # Update needle position based on steps
+        steps_per_needle = self.config.get("steps_per_needle", 1000)
+        needles_moved = steps / steps_per_needle
+        
+        if direction == "CW":
+            self.current_needle_position += needles_moved
+        else:
+            self.current_needle_position -= needles_moved
+            
+        # Keep position within bounds (0 to total_needles_on_machine-1)
+        self.current_needle_position = self.current_needle_position % self.total_needles_on_machine
+        if self.current_needle_position < 0:
+            self.current_needle_position += self.total_needles_on_machine
+            
+        # Update display
+        self.current_needle_display.setText(f"{int(self.current_needle_position)}")
+        
+        # Execute the turn
+        command = f"TURN:{steps}:{direction}"
+        chunk_size = self.config.get("chunk_size", 32000)
+        if steps > chunk_size:
+            self.send_chunked_command(command)
+        else:
+            self.send_command(command)
+            
+        self.log_message(f"Manual turn: {steps} steps {direction} (Position: {int(self.current_needle_position)})")
+        
+    def return_to_home(self):
+        """Return to needle position 0 (home/white needle)"""
+        if self.connect_btn.text() != "Disconnect":
+            QMessageBox.warning(self, "Control Error", "Please connect to Arduino first")
+            return
+        
+        if self.current_needle_position == 0:
+            self.log_message("✅ Already at home position (needle 0)")
+            return
+            
+        # Calculate the shortest path to home (needle 0)
+        current_pos = self.current_needle_position
+        total_needles = self.total_needles_on_machine
+        
+        # Calculate distance going clockwise and counter-clockwise
+        cw_distance = -current_pos if current_pos > 0 else 0
+        ccw_distance = total_needles - current_pos if current_pos > 0 else 0
+        
+        # Choose the shorter path
+        if abs(cw_distance) <= ccw_distance:
+            needles_to_move = abs(cw_distance)
+            direction = "CCW"  # Move counter-clockwise to reduce position
+        else:
+            needles_to_move = ccw_distance
+            direction = "CW"  # Move clockwise to wrap around
+            
+        # Convert needles to steps
+        steps_per_needle = self.config.get("steps_per_needle", 1000)
+        steps_to_move = int(needles_to_move * steps_per_needle)
+        
+        if steps_to_move > 0:
+            # Execute the movement
+            command = f"TURN:{steps_to_move}:{direction}"
+            chunk_size = self.config.get("chunk_size", 32000)
+            if steps_to_move > chunk_size:
+                self.send_chunked_command(command)
+            else:
+                self.send_command(command)
+                
+            # Update position to home
+            self.current_needle_position = 0
+            self.current_needle_display.setText("0")
+            
+            self.log_message(f"🏠 Returning to home: {needles_to_move:.1f} needles {direction} ({steps_to_move} steps)")
+        
+    def reset_needle_position(self):
+        """Reset the current needle position to 0 and send reset command"""
+        self.current_needle_position = 0
+        self.current_needle_display.setText("0")
+        self.send_command("RESET_COUNT")
+        self.log_message("🔄 Needle position reset to 0")
+        
+    def send_custom_command(self):
+        """Send custom command from the text input"""
+        command = self.custom_command.text().strip()
+        if command:
+            self.send_command(command)
+            self.custom_command.clear()
+            self.log_message(f"📤 Custom command sent: {command}")
+            
     def start_continuous_knitting(self):
         """Start continuous knitting with distance monitoring"""
         if self.connect_btn.text() != "Disconnect":
@@ -2902,9 +3102,15 @@ Steps per Needle: {self.config['steps_per_needle']}"""
                 self.log_message(f"🧷 Needle detected! Total count: {count_value}")
                 # Update real-time display immediately
                 self.current_needle_display.setText(count_value)
-                self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #FF6B9D; padding: 15px; background-color: #FFF3F8;")
+                self.current_needle_display.setStyleSheet("font-size: 48px; font-weight: bold; color: #FF6B9D; padding: 20px; background-color: #FFF3F8; border: 2px solid #DDD; border-radius: 8px;")
                 # Flash effect
-                QTimer.singleShot(500, lambda: self.current_needle_display.setStyleSheet("font-size: 36px; font-weight: bold; color: #FF6B9D; padding: 15px;"))
+                QTimer.singleShot(500, lambda: self.current_needle_display.setStyleSheet("font-size: 48px; font-weight: bold; color: #FF6B9D; padding: 20px; background-color: #F9F9F9; border: 2px solid #DDD; border-radius: 8px;"))
+                
+                # Sync internal position tracking with sensor reading
+                try:
+                    self.current_needle_position = float(count_value) % self.total_needles_on_machine
+                except (ValueError, TypeError):
+                    pass  # Keep existing position if conversion fails
                 
                 # Update needle count window if it exists
                 if hasattr(self, 'needle_window') and self.needle_window:
@@ -3049,12 +3255,16 @@ Steps per Needle: {self.config['steps_per_needle']}"""
             self.needle_monitoring_enabled = False
             self.needle_request_pending = False  # Reset the flag
             self.monitor_needle_btn.setText("Start Needle Monitoring")
+            self.sensor_status_label.setText("Monitoring: Stopped")
+            self.sensor_status_label.setStyleSheet("font-size: 14px; color: #666; padding: 8px; background-color: #F0F0F0; border-radius: 4px;")
             self.log_message("Needle monitoring stopped")
         else:
             # Start monitoring
             self.needle_monitoring_enabled = True
             self.needle_timer.start(1000)  # Update every 1000ms (1 time per second) - very safe interval
             self.monitor_needle_btn.setText("Stop Needle Monitoring")
+            self.sensor_status_label.setText("Monitoring: Active")
+            self.sensor_status_label.setStyleSheet("font-size: 14px; color: white; padding: 8px; background-color: #4CAF50; border-radius: 4px;")
             self.log_message("Needle monitoring started (updates 1x per second)")
             
     def check_for_responses(self):
@@ -3253,7 +3463,7 @@ def main():
     
     # Create and show main window
     window = KnittingMachineGUI()
-    window.show()
+    window.showMaximized()
     
     sys.exit(app.exec())
 

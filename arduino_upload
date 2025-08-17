@@ -1,0 +1,443 @@
+// Sentro Knitting Machine Controller - Arduino Code
+// Controls NEMA 17 stepper motor via DRV8825/A4988 driver
+// Compatible with Python Knitting Machine Controller
+//
+// IMPORTANT: This Arduino code sends confirmation responses ("OK" or "DONE")
+// that the Python script waits for before sending the next command.
+// This ensures proper synchronization with the knitting machine.
+
+// Pin definitions
+const int stepPin = 2;
+const int dirPin = 3;
+const int enablePin = 4;  // Optional - connect to ENABLE on driver
+
+// LM393 Infrared Light Barrier Sensor pins
+const int sensorPin = 7;   // Digital output pin of LM393 sensor
+
+// Motor configuration
+const int stepsPerRevolution = 200;  // Standard NEMA 17 (1.8° per step)
+int microstepping = 1;               // Set based on your driver jumpers (1,2,4,8,16,32)
+int motorSpeed = 1000;               // Delay in microseconds between steps (lower = faster)
+
+// Needle counting configuration
+int needleCount = 0;                 // Count of detected needles
+bool lastSensorState = HIGH;         // Previous sensor state (HIGH = no obstruction)
+bool sensorTriggered = false;        // Flag to prevent multiple counts per needle
+unsigned long lastTriggerTime = 0;   // Debounce timing
+const unsigned long debounceDelay = 50; // Minimum time between needle detections (ms)
+
+// Needle target mode variables
+bool needleTargetMode = false;       // Flag for needle target mode
+int needleTarget = 0;                // Target needle count
+int needleStartCount = 0;            // Starting needle count for target mode
+bool targetModeClockwise = true;     // Direction for target mode
+
+// Variables for serial communication - use char array instead of String
+char inputBuffer[32];  // Reduced buffer size
+int bufferIndex = 0;
+boolean stringComplete = false;
+
+void setup() {
+  // Initialize motor pins
+  pinMode(stepPin, OUTPUT);
+  pinMode(dirPin, OUTPUT);
+  pinMode(enablePin, OUTPUT);
+  
+  // Initialize LM393 sensor pin
+  pinMode(sensorPin, INPUT);
+  
+  // Enable the motor driver (LOW = enabled)
+  digitalWrite(enablePin, LOW);
+  
+  // Initialize serial communication
+  Serial.begin(9600);
+  Serial.println(F("=== Sentro Controller ==="));
+  Serial.println(F("Arduino ready"));
+  Serial.println(F("LM393 Infrared Needle Counter initialized"));
+  Serial.println(F("Commands: TURN/REV/SPEED/MICRO/WAIT/NEEDLE_COUNT/RESET_COUNT/NEEDLE_TARGET/STOP/STATUS"));
+  
+  // Initialize sensor state
+  lastSensorState = digitalRead(sensorPin);
+  
+  // Clear input buffer
+  memset(inputBuffer, 0, sizeof(inputBuffer));
+  
+  Serial.println(F("Ready"));
+}
+
+void loop() {
+  // Check for needle detection
+  checkNeedleDetection();
+  
+  // Check for serial commands
+  if (stringComplete) {
+    processCommand();
+    bufferIndex = 0;
+    memset(inputBuffer, 0, sizeof(inputBuffer));
+    stringComplete = false;
+  }
+  
+  // Read serial input character by character
+  while (Serial.available() > 0) {
+    char inChar = (char)Serial.read();
+    
+    if (inChar == '\n' || inChar == '\r') {
+      if (bufferIndex > 0) {
+        inputBuffer[bufferIndex] = '\0';  // Null terminate
+        stringComplete = true;
+        break;
+      }
+    } else if (bufferIndex < sizeof(inputBuffer) - 1) {
+      inputBuffer[bufferIndex] = inChar;
+      bufferIndex++;
+    }
+  }
+}
+
+// Serial event handler - Not used since we handle it in main loop
+// Note: serialEvent() doesn't work on all Arduino boards reliably
+/*
+void serialEvent() {
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    inputString += inChar;
+    if (inChar == '\n') {
+      stringComplete = true;
+    }
+  }
+}
+*/
+
+void processCommand() {
+  // Convert to uppercase for comparison
+  for (int i = 0; i < bufferIndex; i++) {
+    if (inputBuffer[i] >= 'a' && inputBuffer[i] <= 'z') {
+      inputBuffer[i] = inputBuffer[i] - 32;
+    }
+  }
+  
+  // Debug: Show received command
+  Serial.print(F("DEBUG: Command: "));
+  Serial.println(inputBuffer);
+  
+  if (strncmp(inputBuffer, "TURN:", 5) == 0) {
+    // Parse TURN:steps:direction
+    char* stepStr = inputBuffer + 5;
+    char* dirStr = strchr(stepStr, ':');
+    
+    if (dirStr != NULL) {
+      *dirStr = '\0';  // Null terminate step string
+      dirStr++;        // Move to direction
+      
+      int steps = atoi(stepStr);
+      bool isClockwise = (strcmp(dirStr, "CW") == 0);
+      
+      if (steps > 0 && (strcmp(dirStr, "CW") == 0 || strcmp(dirStr, "CCW") == 0)) {
+        Serial.print(F("Turn "));
+        Serial.print(steps);
+        Serial.print(F(" steps "));
+        Serial.println(dirStr);
+        turnSteps(steps, isClockwise);
+        Serial.println(F("DONE"));
+      } else {
+        Serial.println(F("ERROR: Invalid TURN"));
+      }
+    } else {
+      Serial.println(F("ERROR: Invalid TURN format"));
+    }
+  }
+  
+  else if (strncmp(inputBuffer, "REV:", 4) == 0) {
+    // Parse REV:revolutions:direction
+    char* revStr = inputBuffer + 4;
+    char* dirStr = strchr(revStr, ':');
+    
+    if (dirStr != NULL) {
+      *dirStr = '\0';
+      dirStr++;
+      
+      float revolutions = atof(revStr);
+      bool isClockwise = (strcmp(dirStr, "CW") == 0);
+      
+      if (revolutions > 0 && (strcmp(dirStr, "CW") == 0 || strcmp(dirStr, "CCW") == 0)) {
+        int totalSteps = revolutions * stepsPerRevolution * microstepping;
+        Serial.print(revolutions);
+        Serial.print(F(" rev ("));
+        Serial.print(totalSteps);
+        Serial.print(F(" steps) "));
+        Serial.println(dirStr);
+        turnSteps(totalSteps, isClockwise);
+        Serial.println(F("DONE"));
+      } else {
+        Serial.println(F("ERROR: Invalid REV"));
+      }
+    } else {
+      Serial.println(F("ERROR: Invalid REV format"));
+    }
+  }
+  
+  else if (strncmp(inputBuffer, "SPEED:", 6) == 0) {
+    int newSpeed = atoi(inputBuffer + 6);
+    if (newSpeed >= 500 && newSpeed <= 3000) {
+      motorSpeed = newSpeed;
+      Serial.print(F("Speed: "));
+      Serial.println(motorSpeed);
+      Serial.println(F("OK"));
+    } else {
+      Serial.println(F("ERROR: Speed 500-3000"));
+    }
+  }
+  
+  else if (strncmp(inputBuffer, "MICRO:", 6) == 0) {
+    int newMicro = atoi(inputBuffer + 6);
+    if (newMicro == 1 || newMicro == 2 || newMicro == 4 || newMicro == 8 || newMicro == 16 || newMicro == 32) {
+      microstepping = newMicro;
+      Serial.print(F("Microstepping: 1/"));
+      Serial.println(microstepping);
+      Serial.println(F("OK"));
+    } else {
+      Serial.println(F("ERROR: Micro 1,2,4,8,16,32"));
+    }
+  }
+  
+  else if (strncmp(inputBuffer, "WAIT:", 5) == 0) {
+    float waitTime = atof(inputBuffer + 5);
+    if (waitTime >= 0 && waitTime <= 60) {
+      Serial.print(F("Wait "));
+      Serial.println(waitTime);
+      delay(waitTime * 1000);
+      Serial.println(F("DONE"));
+    } else {
+      Serial.println(F("ERROR: Wait 0-60"));
+    }
+  }
+  
+  else if (strcmp(inputBuffer, "STOP") == 0) {
+    Serial.println(F("STOP"));
+    digitalWrite(enablePin, HIGH);
+    delay(100);
+    digitalWrite(enablePin, LOW);
+    Serial.println(F("OK"));
+  }
+  
+  else if (strcmp(inputBuffer, "STATUS") == 0) {
+    Serial.println(F("=== Status ==="));
+    Serial.print(F("Steps/rev: "));
+    Serial.println(stepsPerRevolution);
+    Serial.print(F("Micro: 1/"));
+    Serial.println(microstepping);
+    Serial.print(F("Speed: "));
+    Serial.println(motorSpeed);
+    Serial.print(F("Sensor: "));
+    Serial.println(digitalRead(sensorPin) ? F("CLEAR") : F("BLOCKED"));
+    Serial.print(F("Needles: "));
+    Serial.println(needleCount);
+    Serial.println(F("OK"));
+  }
+  
+  else if (strcmp(inputBuffer, "NEEDLE_COUNT") == 0) {
+    Serial.print(F("Needle count: "));
+    Serial.println(needleCount);
+    Serial.println(F("OK"));
+  }
+  
+  else if (strcmp(inputBuffer, "RESET_COUNT") == 0) {
+    needleCount = 0;
+    needleTargetMode = false;  // Stop any target mode
+    Serial.println(F("Count reset"));
+    Serial.println(F("OK"));
+  }
+  
+  else if (strncmp(inputBuffer, "NEEDLE_TARGET:", 14) == 0) {
+    // Parse NEEDLE_TARGET:count:direction
+    char* countStr = inputBuffer + 14;
+    char* dirStr = strchr(countStr, ':');
+    
+    if (dirStr != NULL) {
+      *dirStr = '\0';  // Null terminate count string
+      dirStr++;        // Move to direction
+      
+      int targetCount = atoi(countStr);
+      bool isClockwise = (strcmp(dirStr, "CW") == 0);
+      
+      if (targetCount > 0 && (strcmp(dirStr, "CW") == 0 || strcmp(dirStr, "CCW") == 0)) {
+        needleTarget = targetCount;
+        needleStartCount = needleCount;
+        targetModeClockwise = isClockwise;
+        needleTargetMode = true;
+        
+        Serial.print(F("Needle target mode: "));
+        Serial.print(targetCount);
+        Serial.print(F(" needles "));
+        Serial.print(dirStr);
+        Serial.print(F(" (starting from "));
+        Serial.print(needleStartCount);
+        Serial.println(F(")"));
+        
+        // Start motor movement
+        turnUntilNeedleTarget();
+        
+        Serial.println(F("DONE"));
+      } else {
+        Serial.println(F("ERROR: Invalid NEEDLE_TARGET"));
+      }
+    } else {
+      Serial.println(F("ERROR: Invalid NEEDLE_TARGET format"));
+    }
+  }
+  
+  else {
+    Serial.print(F("ERROR: Unknown - "));
+    Serial.println(inputBuffer);
+  }
+}
+
+void turnSteps(int steps, boolean clockwise) {
+  // Set direction
+  digitalWrite(dirPin, clockwise ? HIGH : LOW);
+  
+  // Small delay to ensure direction is set
+  delayMicroseconds(10);
+  
+  // Perform steps with progress indication
+  for (int i = 0; i < steps; i++) {
+    // Check for needle detection during motor movement
+    checkNeedleDetection();
+    
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(motorSpeed / 2);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(motorSpeed / 2);
+    
+    // Progress indication for long operations - reduced frequency
+    if (steps > 2000 && i % 1000 == 0 && i > 0) {
+      Serial.print(F("Progress: "));
+      Serial.print(i);
+      Serial.print(F("/"));
+      Serial.println(steps);
+    }
+    
+    // Check for emergency stop every 200 steps - reduced frequency
+    if (i % 200 == 0 && Serial.available()) {
+      char emergencyBuffer[8];
+      int emergencyIndex = 0;
+      
+      while (Serial.available() && emergencyIndex < 7) {
+        char c = Serial.read();
+        if (c >= 'a' && c <= 'z') c = c - 32;  // Convert to uppercase
+        emergencyBuffer[emergencyIndex++] = c;
+        if (c == '\n' || c == '\r') break;
+      }
+      emergencyBuffer[emergencyIndex] = '\0';
+      
+      if (strcmp(emergencyBuffer, "STOP") == 0) {
+        Serial.print(F("STOP at step "));
+        Serial.print(i);
+        Serial.print(F("/"));
+        Serial.println(steps);
+        return;
+      }
+    }
+  }
+}
+
+void checkNeedleDetection() {
+  bool currentSensorState = digitalRead(sensorPin);
+  unsigned long currentTime = millis();
+  
+  // Detect transition from HIGH to LOW (needle blocking sensor)
+  if (lastSensorState == HIGH && currentSensorState == LOW && !sensorTriggered) {
+    // Check debounce timing
+    if (currentTime - lastTriggerTime > debounceDelay) {
+      needleCount++;
+      sensorTriggered = true;
+      lastTriggerTime = currentTime;
+      
+      // Send needle detection notification
+      Serial.print(F("NEEDLE_DETECTED: "));
+      Serial.println(needleCount);
+    }
+  }
+  
+  // Reset trigger flag when sensor clears
+  if (currentSensorState == HIGH && sensorTriggered) {
+    sensorTriggered = false;
+  }
+  
+  lastSensorState = currentSensorState;
+}
+
+void turnUntilNeedleTarget() {
+  // Set direction
+  digitalWrite(dirPin, targetModeClockwise ? HIGH : LOW);
+  
+  // Small delay to ensure direction is set
+  delayMicroseconds(10);
+  
+  int targetNeedlesFromStart = needleTarget;
+  int currentNeedlesFromStart = needleCount - needleStartCount;
+  
+  Serial.print(F("Target: "));
+  Serial.print(targetNeedlesFromStart);
+  Serial.print(F(" needles, Current progress: "));
+  Serial.println(currentNeedlesFromStart);
+  
+  // Continue until target is reached
+  while (needleTargetMode && (needleCount - needleStartCount) < targetNeedlesFromStart) {
+    // Check for needle detection
+    checkNeedleDetection();
+    
+    // Perform one step
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(motorSpeed / 2);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(motorSpeed / 2);
+    
+    // Check for emergency stop every 200 steps
+    static int stepCounter = 0;
+    stepCounter++;
+    if (stepCounter % 200 == 0) {
+      if (Serial.available()) {
+        char emergencyBuffer[8];
+        int emergencyIndex = 0;
+        
+        while (Serial.available() && emergencyIndex < 7) {
+          char c = Serial.read();
+          if (c >= 'a' && c <= 'z') c = c - 32;  // Convert to uppercase
+          emergencyBuffer[emergencyIndex++] = c;
+          if (c == '\n' || c == '\r') break;
+        }
+        emergencyBuffer[emergencyIndex] = '\0';
+        
+        if (strcmp(emergencyBuffer, "STOP") == 0) {
+          needleTargetMode = false;
+          Serial.println(F("STOP command received - target mode cancelled"));
+          return;
+        }
+      }
+      
+      // Progress update every 1000 steps
+      if (stepCounter % 1000 == 0) {
+        int currentProgress = needleCount - needleStartCount;
+        Serial.print(F("Needle progress: "));
+        Serial.print(currentProgress);
+        Serial.print(F("/"));
+        Serial.println(targetNeedlesFromStart);
+      }
+    }
+    
+    // Safety timeout - prevent infinite loop (max ~100,000 steps)
+    if (stepCounter > 100000) {
+      needleTargetMode = false;
+      Serial.println(F("Safety timeout - stopping needle target mode"));
+      return;
+    }
+  }
+  
+  needleTargetMode = false;
+  Serial.print(F("Target reached! Final count: "));
+  Serial.print(needleCount);
+  Serial.print(F(" ("));
+  Serial.print(needleCount - needleStartCount);
+  Serial.println(F(" needles from start)"));
+}
