@@ -70,7 +70,7 @@ class MainWindow(QMainWindow):
         
         # Initial console message (after UI is set up)
         self._log_message("=== Knitting Machine Controller Ready ===")
-        self._log_message("Connect to Arduino to begin")
+        self._log_message("Connect to ESP8266 to begin")
         
         self.logger.info("Main window with console initialized")
     
@@ -155,7 +155,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([840, 360])
         
         # Status bar
-        self.statusBar().showMessage("Ready - Connect to Arduino to begin")
+        self.statusBar().showMessage("Ready - Connect to ESP8266 to begin")
     
     def _create_control_panel(self, parent):
         """Create main control panel"""
@@ -181,24 +181,22 @@ class MainWindow(QMainWindow):
         conn_group = QGroupBox("ESP8266 WiFi Connection")
         conn_layout = QGridLayout(conn_group)
         
-        # Port selection
-        conn_layout.addWidget(QLabel("Port:"), 0, 0)
+        # Device selection
+        conn_layout.addWidget(QLabel("Device:"), 0, 0)
         self.port_combo = NoWheelComboBox()
         self._refresh_ports()
         conn_layout.addWidget(self.port_combo, 0, 1)
         
-        # Refresh ports button
+        # Refresh devices button
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_ports)
         conn_layout.addWidget(refresh_btn, 0, 2)
         
-        # Baudrate selection
-        conn_layout.addWidget(QLabel("Baudrate:"), 0, 3)
-        self.baudrate_combo = NoWheelComboBox()
-        baudrates = ["9600", "19200", "38400", "57600", "115200"]
-        self.baudrate_combo.addItems(baudrates)
-        self.baudrate_combo.setCurrentText(str(self.config.get("baudrate", 9600)))
-        conn_layout.addWidget(self.baudrate_combo, 0, 4)
+        # Manual IP entry
+        conn_layout.addWidget(QLabel("Manual IP:"), 0, 3)
+        self.manual_ip_edit = QLineEdit()
+        self.manual_ip_edit.setPlaceholderText("192.168.1.100")
+        conn_layout.addWidget(self.manual_ip_edit, 0, 4)
         
         # Connect button
         self.connect_btn = QPushButton("Connect")
@@ -1249,49 +1247,109 @@ class MainWindow(QMainWindow):
     # Connection methods
     @pyqtSlot()
     def _refresh_ports(self):
-        """Refresh COM ports"""
+        """Refresh WiFi devices"""
         self.port_combo.clear()
         try:
-            ports = serial.tools.list_ports.comports()
-            if ports:
-                for port in ports:
-                    self.port_combo.addItem(f"{port.device} - {port.description}")
-                self._log_message(f"Found {len(ports)} COM ports")
+            # Refresh device discovery
+            self.controller.wifi_manager.refresh_devices()
+            
+            # Get available devices
+            devices = self.controller.get_available_ports()
+            if devices:
+                for device in devices:
+                    if isinstance(device, dict):
+                        display_text = f"{device.get('name', 'Unknown')} - {device.get('ip', 'N/A')}:{device.get('port', 80)}"
+                        self.port_combo.addItem(display_text)
+                    else:
+                        # Legacy string format
+                        self.port_combo.addItem(str(device))
+                
+                self._log_message(f"Found {len(devices)} WiFi devices")
             else:
-                self.port_combo.addItem("No ports found")
-                self._log_message("No COM ports found")
+                self.port_combo.addItem("No devices found")
+                self._log_message("No WiFi devices found - make sure ESP8266 is powered on and connected to network")
+                
         except Exception as e:
-            self._log_message(f"Error refreshing ports: {e}")
+            self._log_message(f"Error refreshing devices: {e}")
+            self.port_combo.addItem("Error - check network connection")
     
     @pyqtSlot()
     def _toggle_connection(self):
-        """Toggle connection"""
+        """Toggle WiFi connection"""
         if self.connect_btn.text() == "Connect":
-            port_text = self.port_combo.currentText()
-            if not port_text or port_text == "No ports found":
-                QMessageBox.warning(self, "No Port", "Please select a valid port")
+            # Get selected device or manual IP
+            device_text = self.port_combo.currentText()
+            manual_ip = self.manual_ip_edit.text().strip()
+            
+            if manual_ip:
+                # Use manual IP
+                device_info = manual_ip
+            elif device_text and "No devices" not in device_text and "Error" not in device_text:
+                # Parse device info from combo box
+                if " - " in device_text:
+                    # Extract IP:port from "Device Name - IP:port"
+                    device_info = device_text.split(" - ")[1]
+                else:
+                    device_info = device_text
+            else:
+                QMessageBox.warning(self, "No Device", "Please select a device or enter a manual IP address")
                 return
             
-            port = port_text.split(" - ")[0]
             try:
-                # Simulate connection for now
-                self.connect_btn.setText("Disconnect")
-                self.status_label.setText("Connected")
-                self.status_label.setStyleSheet("color: green; font-weight: bold; font-size: 14px;")
-                self.config["arduino_port"] = port
-                self.config["baudrate"] = int(self.baudrate_combo.currentText())
-                self._save_config()
-                self._log_message(f"Connected to {port}")
-                self.statusBar().showMessage(f"Connected to {port}")
+                # Attempt connection
+                self.connect_btn.setText("Connecting...")
+                self.connect_btn.setEnabled(False)
+                self.status_label.setText("Connecting...")
+                self.status_label.setStyleSheet("color: orange; font-weight: bold; font-size: 14px;")
+                
+                # Process events to update UI
+                QApplication.processEvents()
+                
+                # Connect to device
+                success = self.controller.connect_machine(device_info)
+                
+                if success:
+                    self.connect_btn.setText("Disconnect")
+                    self.status_label.setText("Connected")
+                    self.status_label.setStyleSheet("color: green; font-weight: bold; font-size: 14px;")
+                    
+                    # Save successful connection
+                    self.config["wifi_device"] = device_info
+                    self._save_config()
+                    
+                    self._log_message(f"Connected to ESP8266 at {device_info}")
+                    self.statusBar().showMessage(f"Connected to {device_info}")
+                    
+                    # Update UI messages
+                    self._log_message("ESP8266 connected - ready for knitting operations")
+                else:
+                    # Connection failed
+                    self.connect_btn.setText("Connect")
+                    self.status_label.setText("Connection Failed")
+                    self.status_label.setStyleSheet("color: red; font-weight: bold; font-size: 14px;")
+                    QMessageBox.critical(self, "Connection Error", f"Failed to connect to {device_info}")
+                
             except Exception as e:
+                self.connect_btn.setText("Connect")
+                self.status_label.setText("Connection Error")
+                self.status_label.setStyleSheet("color: red; font-weight: bold; font-size: 14px;")
                 self._log_message(f"Connection failed: {e}")
                 QMessageBox.critical(self, "Connection Error", str(e))
+            
+            finally:
+                self.connect_btn.setEnabled(True)
+                
         else:
-            self.connect_btn.setText("Connect")
-            self.status_label.setText("Disconnected")
-            self.status_label.setStyleSheet("color: red; font-weight: bold; font-size: 14px;")
-            self._log_message("Disconnected")
-            self.statusBar().showMessage("Disconnected")
+            # Disconnect
+            try:
+                self.controller.disconnect_machine()
+                self.connect_btn.setText("Connect")
+                self.status_label.setText("Disconnected")
+                self.status_label.setStyleSheet("color: red; font-weight: bold; font-size: 14px;")
+                self._log_message("Disconnected from ESP8266")
+                self.statusBar().showMessage("Disconnected")
+            except Exception as e:
+                self._log_message(f"Disconnect error: {e}")
     
     # Pattern methods
     @pyqtSlot()
