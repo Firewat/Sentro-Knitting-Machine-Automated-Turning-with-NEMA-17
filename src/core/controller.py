@@ -11,7 +11,7 @@ import threading
 from enum import Enum
 
 from ..patterns.models import KnittingPattern, PatternStep, PatternManager
-from ..hardware.serial_manager import SerialManager, CommandResult, CommandStatus
+from ..hardware.wifi_manager import WiFiManager, CommandResult, CommandStatus
 from ..utils.logger import get_logger
 
 
@@ -45,7 +45,7 @@ class KnittingController:
         self.logger = get_logger(__name__)
         
         # Core components
-        self.serial_manager = SerialManager()
+        self.wifi_manager = WiFiManager()
         self.pattern_manager = PatternManager(patterns_dir)
         
         # State
@@ -75,13 +75,13 @@ class KnittingController:
         self.progress_callback = progress_callback  
         self.error_callback = error_callback
     
-    def connect_machine(self, port: str, baudrate: int = 9600) -> bool:
-        """Connect to knitting machine"""
+    def connect_machine(self, device_info: str, baudrate: int = None) -> bool:
+        """Connect to knitting machine via WiFi"""
         try:
-            success = self.serial_manager.connect(port, baudrate)
+            success = self.wifi_manager.connect(device_info, baudrate)
             if success:
                 self._set_state(MachineState.CONNECTED)
-                self.logger.info(f"Connected to machine on {port}")
+                self.logger.info(f"Connected to machine at {device_info}")
             else:
                 self._notify_error("Failed to connect to machine")
             return success
@@ -94,7 +94,7 @@ class KnittingController:
         """Disconnect from knitting machine"""
         try:
             self.stop_execution()
-            self.serial_manager.disconnect()
+            self.wifi_manager.disconnect()
             self._set_state(MachineState.DISCONNECTED)
             self.logger.info("Disconnected from machine")
         except Exception as e:
@@ -158,7 +158,7 @@ class KnittingController:
     def stop_execution(self):
         """Stop current pattern execution"""
         self._stop_execution.set()
-        self.serial_manager.emergency_stop()
+        self.wifi_manager.emergency_stop()
         
         if self._execution_thread and self._execution_thread.is_alive():
             self._execution_thread.join(timeout=2.0)
@@ -188,7 +188,7 @@ class KnittingController:
                 else:
                     self._notify_error(f"Move failed: {result.error}")
             
-            return self.serial_manager.send_command(command, move_callback)
+            return self.wifi_manager.send_command(command, move_callback)
         except Exception as e:
             self.logger.error(f"Error moving to needle: {e}")
             self._notify_error(f"Error moving to needle: {e}")
@@ -199,20 +199,21 @@ class KnittingController:
         return self.move_to_needle(0)
     
     def get_available_ports(self) -> List[str]:
-        """Get available serial ports"""
-        return self.serial_manager.get_available_ports()
+        """Get available WiFi devices"""
+        return self.wifi_manager.get_available_ports()
     
     def get_machine_status(self) -> Dict[str, Any]:
         """Get comprehensive machine status"""
-        serial_status = self.serial_manager.get_status()
+        wifi_status = self.wifi_manager.device_status
+        connection_info = self.wifi_manager.get_connection_info()
         return {
             "state": self.machine_state.value,
-            "connected": serial_status["connected"],
-            "port": serial_status["port"],
-            "baudrate": serial_status["baudrate"],
+            "connected": self.wifi_manager.connected,
+            "host": connection_info.get("host", "N/A"),
+            "port": connection_info.get("port", "N/A"),
             "current_needle": self.current_needle_position,
             "total_needles": self.machine_needle_count,
-            "queue_size": serial_status["queue_size"],
+            "queue_size": self.wifi_manager.get_queue_size(),
             "current_pattern": self.current_pattern.name if self.current_pattern else None,
             "execution_status": self.execution_status
         }
@@ -303,7 +304,7 @@ class KnittingController:
                 execution_result = result
                 result_received.set()
             
-            if not self.serial_manager.send_command(command, step_callback):
+            if not self.wifi_manager.send_command(command, step_callback):
                 return False
             
             # Wait for completion or timeout

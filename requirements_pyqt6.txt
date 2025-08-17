@@ -1,2 +1,5 @@
 PyQt6==6.9.1
 pyserial==3.5
+requests>=2.31.0
+websocket-client>=1.6.0
+zeroconf>=0.131.0

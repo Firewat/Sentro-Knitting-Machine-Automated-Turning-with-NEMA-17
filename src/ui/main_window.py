@@ -6,7 +6,6 @@ Clean interface for knitting machine control with enhanced functionality
 
 import sys
 import json
-import serial.tools.list_ports
 from pathlib import Path
 from datetime import datetime
 from PyQt6.QtWidgets import (
@@ -26,7 +25,7 @@ from ..ui.components import (
 )
 from ..ui.pattern_visualizer import PatternVisualizer
 from ..utils.logger import get_logger, setup_logging
-from config.settings import AppConfig, ThemeConfig, SerialConfig
+from config.settings import AppConfig, ThemeConfig
 
 
 class MainWindow(QMainWindow):
@@ -178,8 +177,8 @@ class MainWindow(QMainWindow):
         parent.addWidget(control_widget)
     
     def _create_connection_section(self, parent_layout):
-        """Create Arduino connection section"""
-        conn_group = QGroupBox("Arduino Connection")
+        """Create ESP8266 WiFi connection section"""
+        conn_group = QGroupBox("ESP8266 WiFi Connection")
         conn_layout = QGridLayout(conn_group)
         
         # Port selection

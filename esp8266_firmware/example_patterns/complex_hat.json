@@ -1,0 +1,136 @@
+{
+  "name": "Complex Hat Pattern",
+  "description": "Multi-section hat pattern with variable speeds and directions",
+  "author": "Advanced Knitting Patterns",
+  "created": "2025-01-17", 
+  "version": "1.2",
+  "machine_settings": {
+    "max_speed": 1500,
+    "acceleration": 800
+  },
+  "steps": [
+    {
+      "type": "speed",
+      "value": 600,
+      "description": "Start with slow speed for brim"
+    },
+    {
+      "type": "move",
+      "value": 800,
+      "direction": "CW", 
+      "description": "Brim section - first pass"
+    },
+    {
+      "type": "move",
+      "value": 800,
+      "direction": "CCW",
+      "description": "Brim section - return pass"
+    },
+    {
+      "type": "move", 
+      "value": 750,
+      "direction": "CW",
+      "description": "Brim section - second pass"
+    },
+    {
+      "type": "move",
+      "value": 750,
+      "direction": "CCW", 
+      "description": "Brim section - return pass"
+    },
+    {
+      "type": "pause",
+      "value": 2000,
+      "description": "Pause before main body"
+    },
+    {
+      "type": "speed",
+      "value": 1000,
+      "description": "Increase speed for main body"
+    },
+    {
+      "type": "move",
+      "value": 1200,
+      "direction": "CW",
+      "description": "Main body - section 1"
+    },
+    {
+      "type": "move", 
+      "value": 1150,
+      "direction": "CCW",
+      "description": "Main body - section 2"
+    },
+    {
+      "type": "move",
+      "value": 1100,
+      "direction": "CW",
+      "description": "Main body - section 3"
+    },
+    {
+      "type": "move",
+      "value": 1050,
+      "direction": "CCW",
+      "description": "Main body - section 4"
+    },
+    {
+      "type": "move",
+      "value": 1000,
+      "direction": "CW", 
+      "description": "Main body - section 5"
+    },
+    {
+      "type": "pause",
+      "value": 1500,
+      "description": "Pause before crown"
+    },
+    {
+      "type": "speed",
+      "value": 800,
+      "description": "Reduce speed for crown shaping"
+    },
+    {
+      "type": "move",
+      "value": 900,
+      "direction": "CCW",
+      "description": "Crown - section 1"
+    },
+    {
+      "type": "move",
+      "value": 800,
+      "direction": "CW",
+      "description": "Crown - section 2"
+    },
+    {
+      "type": "move",
+      "value": 700,
+      "direction": "CCW", 
+      "description": "Crown - section 3"
+    },
+    {
+      "type": "move",
+      "value": 600,
+      "direction": "CW",
+      "description": "Crown - section 4"
+    },
+    {
+      "type": "speed",
+      "value": 400,
+      "description": "Slow speed for final shaping"
+    },
+    {
+      "type": "move",
+      "value": 500,
+      "direction": "CCW",
+      "description": "Final crown section"
+    },
+    {
+      "type": "move",
+      "value": 300,
+      "direction": "CW",
+      "description": "Top closure"
+    }
+  ],
+  "total_needles": 15800,
+  "estimated_time": "18 minutes", 
+  "difficulty": "Advanced"
+}

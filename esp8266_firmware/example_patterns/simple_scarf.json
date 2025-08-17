@@ -1,0 +1,71 @@
+{
+  "name": "Simple Scarf Pattern",
+  "description": "Basic scarf pattern with alternating directions",
+  "author": "Knitting Machine Controller",
+  "created": "2025-01-17",
+  "version": "1.0",
+  "machine_settings": {
+    "max_speed": 1000,
+    "acceleration": 500
+  },
+  "steps": [
+    {
+      "type": "speed",
+      "value": 800,
+      "description": "Set moderate speed for startup"
+    },
+    {
+      "type": "move", 
+      "value": 500,
+      "direction": "CW",
+      "description": "Move 500 steps clockwise"
+    },
+    {
+      "type": "pause",
+      "value": 1000,
+      "description": "Pause 1 second"
+    },
+    {
+      "type": "move",
+      "value": 500, 
+      "direction": "CCW",
+      "description": "Move 500 steps counter-clockwise"
+    },
+    {
+      "type": "pause",
+      "value": 1000,
+      "description": "Pause 1 second"
+    },
+    {
+      "type": "move",
+      "value": 600,
+      "direction": "CW", 
+      "description": "Move 600 steps clockwise"
+    },
+    {
+      "type": "pause",
+      "value": 500,
+      "description": "Short pause"
+    },
+    {
+      "type": "move",
+      "value": 600,
+      "direction": "CCW",
+      "description": "Move 600 steps counter-clockwise"
+    },
+    {
+      "type": "speed",
+      "value": 1200,
+      "description": "Increase speed for final moves"
+    },
+    {
+      "type": "move",
+      "value": 400,
+      "direction": "CW",
+      "description": "Final clockwise move"
+    }
+  ],
+  "total_needles": 3000,
+  "estimated_time": "5 minutes",
+  "difficulty": "Easy"
+}
