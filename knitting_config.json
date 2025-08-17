@@ -1,12 +1,12 @@
 {
-  "steps_per_needle": 107,
-  "arduino_port": "COM3",
-  "baudrate": 9600,
-  "motor_speed": 500,
-  "microstepping": 32,
-  "chunk_size": 30000,
-  "theme": "Light/Grey",
-  "default_speed": 2000,
-  "com_port": "COM3",
-  "total_needles": 48
+    "steps_per_needle": 1100,
+    "arduino_port": "COM3",
+    "baudrate": 9600,
+    "motor_speed": 500,
+    "microstepping": 32,
+    "chunk_size": 30000,
+    "theme": "Pink/Rose",
+    "default_speed": 2000,
+    "com_port": "COM3",
+    "total_needles": 48
 }

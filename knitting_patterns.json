@@ -1,85 +1,40 @@
 [
-  {
-    "name": "test_pattern_1",
-    "description": "test_description_1",
-    "repetitions": 1,
-    "steps": [
-      {
-        "needles": 48,
-        "direction": "CW",
-        "rows": 1,
-        "description": "48 needles CW"
-      },
-      {
-        "needles": 32,
-        "direction": "CCW",
-        "rows": 1,
-        "description": "32 needles CCW"
-      },
-      {
-        "needles": 48,
-        "direction": "CCW",
-        "rows": 10,
-        "description": "48 needles CCW"
-      }
-    ]
-  },
-  {
-    "name": "test_10_rows",
-    "description": "",
-    "repetitions": 1,
-    "steps": [
-      {
-        "needles": 48,
-        "direction": "CCW",
-        "rows": 10,
-        "description": "48 needles CCW"
-      }
-    ]
-  },
-  {
-    "name": "test_pattern_2_10rows",
-    "description": "",
-    "repetitions": 10,
-    "steps": [
-      {
-        "needles": 48,
-        "direction": "CW",
-        "rows": 10,
-        "description": "48 needles CW"
-      }
-    ]
-  },
-  {
-    "name": "test_pattern_3",
-    "description": "",
-    "repetitions": 1,
-    "steps": [
-      {
-        "needles": 48,
-        "direction": "CW",
-        "rows": 10,
-        "description": "48 needles \u00d7 10 rows CW"
-      }
-    ]
-  },
-  {
-    "name": "New Pattern",
-    "description": "",
-    "repetitions": 10,
-    "steps": [
-      {
-        "needles": 5,
-        "direction": "CW",
-        "rows": 1,
-        "description": "5 needles \u00d7 1 rows CW"
-      },
-      {
-        "needles": 5,
-        "direction": "CCW",
-        "rows": 1,
-        "description": "5 needles \u00d7 1 rows CCW"
-      }
-    ]
-  }
+    {
+        "name": "Basic Hat Pattern",
+        "description": "Simple hat with ribbing and stockinette",
+        "repetitions": 2,
+        "steps": [
+            {
+                "needles": 48,
+                "direction": "CW",
+                "rows": 10,
+                "description": "48 needles  10 rows CW (ribbing)"
+            },
+            {
+                "needles": 48,
+                "direction": "CCW",
+                "rows": 20,
+                "description": "48 needles  20 rows CCW (body)"
+            },
+            {
+                "needles": 24,
+                "direction": "CW",
+                "rows": 5,
+                "description": "24 needles  5 rows CW (crown)"
+            }
+        ]
+    },
+    {
+        "name": "Simple Scarf",
+        "description": "Long continuous knit scarf",
+        "repetitions": 5,
+        "steps": [
+            {
+                "needles": 40,
+                "direction": "CW",
+                "rows": 50,
+                "description": "40 needles  50 rows CW (length section)"
+            }
+        ]
+    }
 ]
